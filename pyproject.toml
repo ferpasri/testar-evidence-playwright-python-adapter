@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testar-evidence-playwright-adapter"
+version = "0.2.1"
+description = "Playwright actions, browser captures, and test-oracle results as portable TESTAR evidence"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+dependencies = [
+    "testar-evidence>=0.2.1,<0.3",
+    "playwright>=1.58,<2",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/ferpasri/testar-evidence-playwright-python-adapter"
+Specifications = "https://github.com/ferpasri/testar-evidence-specs"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+testar_evidence_playwright = ["resources/*.js"]
