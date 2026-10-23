@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from playwright.sync_api import Error as PlaywrightError, Locator, Page
 from testar_evidence import (
-    ActionCandidate, ActionDefinition, CheckReading, CheckResult, CheckRule, CheckTarget,
+    ActionCandidate as CandidateBinding, ActionDefinition, CheckReading, CheckResult, CheckRule, CheckTarget,
     ConcreteState, EvidenceEvent, Execution, JsonlStore, Manifest, Observation, Run,
 )
 
@@ -23,12 +23,32 @@ from .capture import BrowserSnapshot, CaptureOptions, capture_page, identity, ta
 from .checks import PlaywrightChecks
 
 
+@dataclass(frozen=True)
+class ActionCandidate:
+    """An action candidate reported by a tool, including its planning parameters."""
+    kind: str
+    name: str
+    locator: Locator | None = None
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+    def definition(self) -> ActionDefinition:
+        description = self.name if self.locator is None else str(self.locator)
+        parameters = EvidenceEvent("validation:event", "action_defined",
+            ActionDefinition("validation:action", self.kind, self.parameters)).to_dict()["event"]["data"]["properties"]
+        return ActionDefinition("playwright:available:" + identity(json.dumps(
+            [self.kind, self.name, description, parameters], sort_keys=True)), self.kind,
+            {"playwright.description": self.name, "playwright.locator": description,
+             "playwright.available_parameters": parameters})
+
+
 @dataclass
 class _PendingObservation:
     id: str
     sequence: int
     snapshot: BrowserSnapshot
     checks: list[CheckResult] = field(default_factory=list)
+    candidates: list[CandidateBinding] | None = None
+    candidate_scope: str = "unknown"
 
 
 class PlaywrightEvidence:
@@ -130,8 +150,42 @@ class PlaywrightEvidence:
         return self.perform("fill", "Fill " + str(locator), locator,
             {**options, "playwright.redacted_parameters": ["value"]}, lambda: locator.fill(value, **options))
 
+    def record_candidates(self, actions: list[ActionCandidate], *, scope: str = "generated") -> str:
+        """Capture a visit with the action candidates a tool reports, including an empty list."""
+        self._require_active()
+        if self._selected_execution is not None:
+            raise RuntimeError("Report the selected action's outcome before recording action candidates")
+        if scope not in {"generated", "eligible", "unknown"}:
+            raise ValueError("Candidate scope must be generated, eligible, or unknown")
+        if not isinstance(actions, list) or not all(isinstance(action, ActionCandidate) for action in actions):
+            raise TypeError("Actions must be a list of ActionCandidate values")
+        definitions = [action.definition() for action in actions]
+        self._busy = True
+        try:
+            if self._pending is not None:
+                self._flush()
+            self._ensure_pending()
+            candidates = []
+            resolved = {}
+            with self._recording_scope():
+                for action, definition in zip(actions, definitions):
+                    description = None if action.locator is None else str(action.locator)
+                    if description not in resolved:
+                        widget = self._pending.snapshot.widget_at(target_path(action.locator))
+                        resolved[description] = None if widget is None else widget.id
+                    candidate = CandidateBinding(definition.id, resolved[description])
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+            for definition in definitions:
+                self._define_action(definition)
+            self._pending.candidates = candidates
+            self._pending.candidate_scope = scope
+            return self._pending.id
+        finally:
+            self._busy = False
+
     def select_action(self, kind: str, name: str, locator: Locator | None,
-                      parameters: dict[str, Any]) -> str:
+                      parameters: dict[str, Any], *, candidate: ActionCandidate | None = None) -> str:
         """Record the selected action before the caller executes it."""
         self._require_active()
         if self._selected_execution is not None:
@@ -139,6 +193,13 @@ class PlaywrightEvidence:
         description = name if locator is None else str(locator)
         definition = ActionDefinition("playwright:action:" + identity(json.dumps([kind, name, description])),
             kind, {"playwright.description": name, "playwright.locator": description})
+        if candidate is not None:
+            if not isinstance(candidate, ActionCandidate):
+                raise TypeError("candidate must be ActionCandidate")
+            if (kind, name, description) != (candidate.kind, candidate.name,
+                    candidate.name if candidate.locator is None else str(candidate.locator)):
+                raise ValueError("Selected action must match its candidate description")
+            definition = candidate.definition()
         EvidenceEvent("validation:event", "action_defined", definition).to_dict()
         # Validate and copy arguments before any action can affect the application.
         prepared = EvidenceEvent("validation:event", "action_selected",
@@ -149,6 +210,11 @@ class PlaywrightEvidence:
             self._ensure_pending()
             with self._recording_scope():
                 widget = self._pending.snapshot.widget_at(target_path(locator))
+            if candidate is not None and self._pending.candidates is not None:
+                binding = next((item for item in self._pending.candidates if item.action == definition.id), None)
+                if binding is None:
+                    raise ValueError("Selected action was not reported for this observation")
+                widget = next((item for item in self._pending.snapshot.widgets if item.id == binding.target), None)
             if locator is not None:
                 prepared["playwright.locator"] = description
                 prepared["playwright.target_resolution"] = "not_captured" if widget is None else "captured_dom_path"
@@ -193,11 +259,12 @@ class PlaywrightEvidence:
             self._ending_reason = "action_failed"
 
     def perform(self, kind: str, name: str, locator: Locator | None,
-                parameters: dict[str, Any], operation: Callable[[], Any]) -> Any:
+                parameters: dict[str, Any], operation: Callable[[], Any], *,
+                candidate: ActionCandidate | None = None) -> Any:
         """Record one action, its actual arguments, and its returned or raised outcome."""
         if not callable(operation):
             raise TypeError("Action operation must be callable")
-        self.select_action(kind, name, locator, parameters)
+        self.select_action(kind, name, locator, parameters, candidate=candidate)
         self._busy = True
         try:
             try:
@@ -331,15 +398,12 @@ class PlaywrightEvidence:
 
     def _flush(self, definition: ActionDefinition | None = None, target: str | None = None) -> str:
         pending = self._pending
-        candidates = []
+        candidates = [] if pending.candidates is None else list(pending.candidates)
         if definition is not None:
-            previous = self._definitions.get(definition.id)
-            if previous is not None and previous != definition:
-                raise ValueError("Conflicting action definition: " + definition.id)
-            if previous is None:
-                self._emit("action_defined", definition)
-                self._definitions[definition.id] = definition
-            candidates = [ActionCandidate(definition.id, target)]
+            self._define_action(definition)
+            selected = CandidateBinding(definition.id, target)
+            if selected not in candidates:
+                candidates.append(selected)
         artifacts = []
         if pending.snapshot.screenshot is not None:
             try:
@@ -350,7 +414,7 @@ class PlaywrightEvidence:
         state = ConcreteState(pending.id + ":snapshot", pending.snapshot.properties,
             pending.snapshot.widgets, "filtered")
         self._emit("observed", Observation(pending.id, self.run_id, pending.sequence,
-            pending.snapshot.timestamp_micros, state, candidates, "unknown", artifacts))
+            pending.snapshot.timestamp_micros, state, candidates, pending.candidate_scope, artifacts))
         self._last_observation = pending.id
         self._pending = None
         if self._pending_result is not None:
@@ -359,6 +423,14 @@ class PlaywrightEvidence:
         for check in pending.checks:
             self._emit("checked", check)
         return pending.id
+
+    def _define_action(self, definition: ActionDefinition) -> None:
+        previous = self._definitions.get(definition.id)
+        if previous is not None and previous != definition:
+            raise ValueError("Conflicting action definition: " + definition.id)
+        if previous is None:
+            self._emit("action_defined", definition)
+            self._definitions[definition.id] = definition
 
     def _emit(self, kind: str, data: Any) -> None:
         sequence = self._events + 1

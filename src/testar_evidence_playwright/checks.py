@@ -42,11 +42,14 @@ class PlaywrightChecks:
             assertion=lambda: expect(locator).to_have_text(expected, timeout=self.timeout_millis),
             reading=lambda: CheckReading.value(locator.text_content(timeout=self.timeout_millis)))
 
-    def record_result(self, rule_id: str, name: str, status: str, error: str | None = None) -> None:
+    def record_result(self, rule_id: str, name: str, status: str, error: str | None = None, *,
+                      details: dict[str, Any] | None = None) -> None:
         """Record an already executed check against the latest captured observation."""
         self._recording_error = None
         self._evidence._require_active()
-        details = {} if error is None else {"playwright.assertion_error": error}
+        details = {} if details is None else dict(details)
+        if error is not None:
+            details["playwright.assertion_error"] = error
         rule = CheckRule(rule_id)
         EvidenceEvent("validation:event", "checked", CheckResult(self._evidence.run_id, name, rule,
             CheckTarget.run(), status, actual=CheckReading.unknown(), details=details)).to_dict()

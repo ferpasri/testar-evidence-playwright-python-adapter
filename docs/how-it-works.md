@@ -81,7 +81,9 @@ Repeated assertions can produce separate observations without action links betwe
 
 ## When an integration needs more information
 
-The facade sees supported Playwright operations and assertions. An exploratory tool may also know which alternative actions it discovered, why it selected one, or which custom oracle callback it ran. The tool supplies those details through explicit integration.
+The facade sees supported Playwright operations and assertions. An exploratory tool may also know which action candidates it discovered, why it selected one, or which custom oracle callback it ran. The tool supplies those details through explicit integration.
+
+Use the adapter's `ActionCandidate` to describe a discovered candidate, including its locator and planning parameters. `record_candidates(...)` saves the reported list at an observation. Passing `candidate=` to `perform` or `select_action` connects the selected execution to that candidate.
 
 For a facade page, use `evidence_for(page)` to access its existing recorder. The following custom test oracle is added to the same automatic trace:
 

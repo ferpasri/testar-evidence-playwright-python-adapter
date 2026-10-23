@@ -107,7 +107,19 @@ After submission, call `capture()` to collect the resulting state. An accepted e
 
 A capture stays pending so it can also contain the next selected candidate. Reported check results refer to that same captured observation, use an unknown actual reading, and make no widget/property target claim. Their callbacks are not executed again. Frameworks needing detailed targets and readings use `checks.evaluate`. The caller decides capture timing; DOM reads, checks, and screenshots remain separate operations.
 
-Ordinary Python assertions, tool-specific oracle callbacks, discovered alternatives, and reasons for action selection require caller-supplied integration. The explicit APIs provide the recording points for that information.
+Ordinary Python assertions, tool-specific oracle callbacks, discovered action candidates, and reasons for action selection require caller-supplied integration. The explicit APIs provide the recording points for that information.
+
+## Reported action candidates
+
+`ActionCandidate(kind, name, locator, parameters)` describes an action candidate reported by the caller. The locator identifies its Playwright target; the parameters describe the planned interaction, such as an input-generation strategy. `record_candidates(actions, scope=...)` captures an observation containing those candidates. In the saved trace, each candidate identifies its action definition and a captured widget when available. An explicitly supplied empty list is also recorded.
+
+Candidate scope is `generated`, `eligible`, or `unknown`. It describes whether the caller supplied generated actions, the action candidates eligible for its selection process, or an unspecified list. Capture scope separately describes which widgets and properties were collected.
+
+Pass the same candidate as `candidate` to `perform` or `select_action`. The selected execution then refers to the reported candidate's action definition. Actual arguments remain on the execution. Different planning parameters identify different action definitions. Repeated identical candidates are deduplicated within the observation. An unreported candidate is rejected before its operation when the observation has an explicit candidate list.
+
+`record_candidates` captures a new visit after flushing any previous pending capture. Discovery, target binding, and capture are separate browser readings. An unavailable target remains unbound; the adapter does not invent a widget. Callers control which action candidates they report and protect sensitive planning parameters.
+
+`checks.record_result(..., details=...)` also accepts caller context, such as an attempt number. It records an already executed callback's status against the pending observation, with an unknown actual reading. Detailed expectations and widget/property targets use `checks.evaluate`.
 
 ## Persistence and ending
 

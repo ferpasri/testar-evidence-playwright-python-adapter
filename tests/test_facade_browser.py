@@ -14,7 +14,7 @@ from playwright.sync_api import (
     sync_playwright as native_sync_playwright,
 )
 from testar_evidence import EvidenceReader
-from testar_evidence_playwright import CaptureOptions, expect, sync_playwright
+from testar_evidence_playwright import CaptureOptions, __version__, expect, sync_playwright
 
 
 class FacadeFixture:
@@ -143,7 +143,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
                     model = EvidenceReader.read(manifest.parent)
                     properties = next(iter(model.runs.values()))["run"]["properties"]
                     self.assertEqual("testar-evidence-playwright-python-adapter", properties["evidence.adapter"])
-                    self.assertEqual("0.2.2", properties["evidence.adapter_version"])
+                    self.assertEqual(__version__, properties["evidence.adapter_version"])
                     descriptions = configuration.get("properties", {
                         "evidence.origin": configuration.get("origin"),
                         "evidence.test_objective": configuration.get("test_objective"),
