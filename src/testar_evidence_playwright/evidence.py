@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 from pathlib import Path
+import re
 from threading import get_ident
 from typing import Any, Callable
 from uuid import uuid4
@@ -15,10 +18,9 @@ from testar_evidence import (
     ConcreteState, EvidenceEvent, Execution, JsonlStore, Manifest, Observation, Run,
 )
 
+from ._metadata import VERSION as VERSION, run_properties
 from .capture import BrowserSnapshot, CaptureOptions, capture_page, identity, target_path
 from .checks import PlaywrightChecks
-
-VERSION = "0.2.1"
 
 
 @dataclass
@@ -45,6 +47,8 @@ class PlaywrightEvidence:
         self._executions = 0
         self._pending = None
         self._pending_result = None
+        self._selected_execution = None
+        self._selected_parameters = None
         self._last_observation = None
         self._ending_reason = "closed"
         self._finished = False
@@ -54,20 +58,19 @@ class PlaywrightEvidence:
 
     @classmethod
     def start(cls, directory: str | Path, page: Page, options: CaptureOptions | None = None,
-              properties: dict[str, Any] | None = None) -> PlaywrightEvidence:
+              properties: dict[str, Any] | None = None, *, origin: str | None = None,
+              test_objective: str | None = None) -> PlaywrightEvidence:
         """Create a new trace at the exact supplied directory, preserving existing files."""
         if page is None:
             raise TypeError("A synchronous Playwright page is required")
         options = CaptureOptions() if options is None else options
         if not isinstance(options, CaptureOptions):
             raise TypeError("options must be CaptureOptions")
-        if properties is not None and not isinstance(properties, dict):
-            raise TypeError("Run properties must be a dictionary")
-        run_properties = dict(properties or {})
-        run_properties.update({"playwright.adapter_version": VERSION, "playwright.initial_url": page.url})
+        supplied = run_properties(properties, origin=origin, test_objective=test_objective)
+        supplied["playwright.initial_url"] = page.url
         identifier = uuid4().hex
         run_id = "playwright-python:run:" + identifier
-        run = Run(run_id, "playwright-python", identifier, run_properties)
+        run = Run(run_id, "playwright-python", identifier, supplied)
         EvidenceEvent("validation:event", "run_started", run).to_dict()
         store = JsonlStore.create(directory, Manifest("playwright-python:model:" + identifier))
         evidence = cls(page, options, store, run_id)
@@ -77,6 +80,27 @@ class PlaywrightEvidence:
             store.close()
             raise
         return evidence
+
+    @classmethod
+    def start_trace(cls, parent: str | Path, page: Page, *, sut: str = "application",
+                    test_objective: str | None = None, sequence: int | None = None,
+                    options: CaptureOptions | None = None, properties: dict[str, Any] | None = None,
+                    origin: str | None = None) -> PlaywrightEvidence:
+        """Reserve a timestamped trace directory beneath the supplied parent."""
+        if not isinstance(sut, str) or not sut.strip():
+            raise ValueError("SUT label must be a nonblank string")
+        if sequence is not None and (type(sequence) is not int or sequence < 1):
+            raise ValueError("Sequence must be a positive integer")
+        supplied = run_properties(properties, origin=origin, test_objective=test_objective)
+        directory = _trace_directory(Path(parent), sut, supplied.get("evidence.test_objective", "run"), sequence)
+        supplied["playwright.sut"] = sut
+        if sequence is not None:
+            supplied["playwright.sequence"] = sequence
+        return cls.start(directory, page, options, supplied)
+
+    @property
+    def directory(self) -> Path:
+        return self._store.directory
 
     @property
     def run_id(self) -> str:
@@ -106,12 +130,12 @@ class PlaywrightEvidence:
         return self.perform("fill", "Fill " + str(locator), locator,
             {**options, "playwright.redacted_parameters": ["value"]}, lambda: locator.fill(value, **options))
 
-    def perform(self, kind: str, name: str, locator: Locator | None,
-                parameters: dict[str, Any], operation: Callable[[], Any]) -> Any:
-        """Record one action, its actual arguments, and its returned or raised outcome."""
+    def select_action(self, kind: str, name: str, locator: Locator | None,
+                      parameters: dict[str, Any]) -> str:
+        """Record the selected action before the caller executes it."""
         self._require_active()
-        if not callable(operation):
-            raise TypeError("Action operation must be callable")
+        if self._selected_execution is not None:
+            raise RuntimeError("Report the selected action's outcome before selecting another")
         description = name if locator is None else str(locator)
         definition = ActionDefinition("playwright:action:" + identity(json.dumps([kind, name, description])),
             kind, {"playwright.description": name, "playwright.locator": description})
@@ -123,32 +147,85 @@ class PlaywrightEvidence:
         self._busy = True
         try:
             self._ensure_pending()
-            widget = self._pending.snapshot.widget_at(target_path(locator))
-            prepared["playwright.origin"] = "scripted"
+            with self._recording_scope():
+                widget = self._pending.snapshot.widget_at(target_path(locator))
             if locator is not None:
                 prepared["playwright.locator"] = description
                 prepared["playwright.target_resolution"] = "not_captured" if widget is None else "captured_dom_path"
-                if "value" in prepared and self._password_target(locator, widget):
-                    prepared.pop("value", None)
-                    prepared["playwright.redacted_parameters"] = ["value"]
+            secret_parameters = {"value", "text", "key", "playwright.positional_arguments",
+                "playwright.keyword_arguments"}.intersection(prepared)
+            if secret_parameters:
+                with self._recording_scope():
+                    secret_target = locator is None or self._password_target(locator, widget)
+                if secret_target:
+                    for parameter in secret_parameters:
+                        prepared.pop(parameter)
+                    previous = prepared.get("playwright.redacted_parameters", [])
+                    prepared["playwright.redacted_parameters"] = sorted(set(previous) | secret_parameters)
             source = self._flush(definition, None if widget is None else widget.id)
             self._executions += 1
             execution = self.run_id + ":execution:" + str(self._executions)
             self._emit("action_selected", Execution(execution, self.run_id, source, definition.id,
                 None if widget is None else widget.id, prepared))
+            self._selected_execution = execution
+            self._selected_parameters = prepared
+            return execution
+        finally:
+            self._busy = False
+
+    def submit_action(self, accepted: bool, error: str | None = None) -> None:
+        """Report the execution outcome returned by the caller's tool."""
+        self._require_active()
+        self._submit_action(accepted, error)
+
+    def _submit_action(self, accepted: bool, error: str | None = None) -> None:
+        execution = self._selected_execution
+        if execution is None:
+            raise RuntimeError("No selected action is awaiting an outcome")
+        submission = {"execution": execution, "accepted": accepted, "error": error}
+        EvidenceEvent("validation:event", "action_submitted", submission).to_dict()
+        self._emit("action_submitted", submission)
+        self._selected_execution = None
+        self._selected_parameters = None
+        if accepted:
+            self._pending_result = execution
+        else:
+            self._ending_reason = "action_failed"
+
+    def perform(self, kind: str, name: str, locator: Locator | None,
+                parameters: dict[str, Any], operation: Callable[[], Any]) -> Any:
+        """Record one action, its actual arguments, and its returned or raised outcome."""
+        if not callable(operation):
+            raise TypeError("Action operation must be callable")
+        self.select_action(kind, name, locator, parameters)
+        self._busy = True
+        try:
             try:
-                result = operation()
+                with self._recording_scope():
+                    result = operation()
             except BaseException as error:
                 self._ending_reason = "action_failed"
                 try:
-                    self._emit("action_submitted", {"execution": execution, "accepted": False,
-                        "error": self._action_error(error, prepared)})
+                    self._submit_action(False, self._action_error(error, self._selected_parameters))
                 except Exception as recording:
                     error.add_note("Evidence recording also failed: " + str(recording))
                 raise
-            self._emit("action_submitted", {"execution": execution, "accepted": True, "error": None})
-            self._pending_result = execution
+            self._submit_action(True)
             return result
+        finally:
+            self._busy = False
+
+    def capture(self) -> str:
+        """Capture a visit for the next action or reported check, retaining its identity."""
+        self._require_active()
+        if self._selected_execution is not None:
+            raise RuntimeError("Report the action outcome before capturing its result state")
+        self._busy = True
+        try:
+            if self._pending is not None:
+                self._flush()
+            self._ensure_pending()
+            return self._pending.id
         finally:
             self._busy = False
 
@@ -164,17 +241,22 @@ class PlaywrightEvidence:
         finally:
             self._busy = False
 
-    def finish(self, reason: str = "completed") -> None:
+    def finish(self, reason: str = "completed", *, capture_final: bool = True) -> None:
+        """Finish the run, using only saved captures when the page is no longer available."""
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Run-ending reason must be nonblank text")
+        if type(capture_final) is not bool:
+            raise TypeError("capture_final must be a boolean")
         if self._finished:
             return
         self._require_active()
         EvidenceEvent("validation:event", "run_finished", {"run": self.run_id, "reason": reason}).to_dict()
         self._busy = True
         try:
-            if self._pending is not None or self._pending_result is not None or self._last_observation is None:
+            if self._pending is None and capture_final and \
+                    (self._pending_result is not None or self._last_observation is None):
                 self._ensure_pending()
+            if self._pending is not None:
                 self._flush()
             self._emit("run_finished", {"run": self.run_id, "reason": reason})
             self._finished = True
@@ -200,6 +282,11 @@ class PlaywrightEvidence:
         return self
 
     def __exit__(self, exception_type, exception, traceback) -> None:
+        if exception is not None and self._selected_execution is not None and not self._broken:
+            try:
+                self.submit_action(False, self._action_error(exception, self._selected_parameters))
+            except Exception as recording:
+                exception.add_note("Evidence recording also failed: " + str(recording))
         if exception is not None and self._ending_reason == "closed":
             self._ending_reason = "script_failed"
         try:
@@ -211,13 +298,14 @@ class PlaywrightEvidence:
 
     def _record_check(self, name: str, rule: CheckRule, locator: Locator | None,
                       property: str | None, expected: Any, status: str,
-                      actual: CheckReading, details: dict[str, Any]) -> None:
+                      actual: CheckReading, details: dict[str, Any], *, reuse_capture: bool = False) -> None:
         if status in {"failed", "error"}:
             self._ending_reason = "check_failed"
-        if self._pending is not None:
+        if self._pending is not None and not reuse_capture:
             self._flush()
         self._ensure_pending()
-        widget = self._pending.snapshot.widget_at(target_path(locator))
+        with self._recording_scope():
+            widget = self._pending.snapshot.widget_at(target_path(locator))
         details = dict(details)
         if locator is None:
             target = CheckTarget.observation(self._pending.id) if property is None else \
@@ -235,7 +323,8 @@ class PlaywrightEvidence:
 
     def _ensure_pending(self) -> None:
         if self._pending is None:
-            snapshot = capture_page(self._page, self._options)
+            with self._recording_scope():
+                snapshot = capture_page(self._page, self._options)
             self._observations += 1
             self._pending = _PendingObservation(self.run_id + ":observation:" + str(self._observations),
                 self._observations, snapshot)
@@ -289,6 +378,10 @@ class PlaywrightEvidence:
         if self._busy:
             raise RuntimeError("An evidence operation is already running; wrap individual actions or one outer action")
 
+    def _recording_scope(self):
+        runtime = getattr(self._page, "_evidence_runtime", None)
+        return nullcontext() if runtime is None else runtime.suspended()
+
     @staticmethod
     def _password_target(locator: Locator, widget) -> bool:
         if widget is not None and str(widget.properties.get("playwright.attribute.type", "")).lower() == "password":
@@ -306,3 +399,21 @@ class PlaywrightEvidence:
         if "playwright.redacted_parameters" in parameters:
             return type(error).__name__ + ": action failed; details omitted because its parameters contain a secret"
         return type(error).__name__ + ": " + str(error)
+
+
+def _trace_directory(parent: Path, sut: str, test_objective: str, sequence: int | None) -> Path:
+    def label(value):
+        return re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-_")[:32].rstrip("-_") or "trace"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+    number = "" if sequence is None else f"_sequence-{sequence}"
+    name = f"{label(sut)}_{label(test_objective)}{number}_trace-{timestamp}"
+    parent.mkdir(parents=True, exist_ok=True)
+    suffix = 1
+    while True:
+        directory = parent / (name if suffix == 1 else f"{name}-{suffix}")
+        try:
+            directory.mkdir()
+            return directory
+        except FileExistsError:
+            suffix += 1

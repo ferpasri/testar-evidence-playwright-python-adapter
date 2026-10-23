@@ -134,6 +134,24 @@ class RecordingTests(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     evidence.checks.timeout_millis = value
 
+    def test_recording_error_remains_available_alongside_an_original_oracle_failure(self):
+        failure = AssertionError("Original oracle finding")
+        recording_failure = OSError("Cannot capture the page")
+
+        def assertion():
+            raise failure
+
+        with self.start() as evidence:
+            with patch.object(evidence, "_record_check", side_effect=recording_failure):
+                with self.assertRaises(AssertionError) as caught:
+                    evidence.checks.evaluate("Condition", rule=CheckRule("fixture:condition"),
+                        assertion=assertion, reading=CheckReading.unknown)
+            self.assertIs(failure, caught.exception)
+            self.assertIs(recording_failure, evidence.checks.recording_error)
+            evidence.checks.evaluate("Another condition", rule=CheckRule("fixture:other"),
+                assertion=lambda: None, reading=CheckReading.unknown)
+            self.assertIsNone(evidence.checks.recording_error)
+
 
 if __name__ == "__main__":
     unittest.main()

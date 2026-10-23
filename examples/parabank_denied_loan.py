@@ -96,7 +96,9 @@ def main() -> None:
             with PlaywrightEvidence.start(
                 output,
                 page,
-                properties={"example.sut": "parabank", "example.test_objective": "denied-loan"},
+                properties={"example.sut": "parabank"},
+                origin="Loan-denial example script",
+                test_objective="Verify that an oversized loan request is denied",
             ) as evidence:
                 print(f"Evidence: {output.resolve()}")
                 evidence.checks.timeout_millis = 15_000

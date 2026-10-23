@@ -18,6 +18,12 @@ class PlaywrightChecks:
     def __init__(self, evidence: PlaywrightEvidence):
         self._evidence = evidence
         self._timeout_millis = 5_000.0
+        self._recording_error = None
+
+    @property
+    def recording_error(self) -> Exception | None:
+        """A recording failure from the latest evaluation, including one attached to an oracle failure."""
+        return self._recording_error
 
     @property
     def timeout_millis(self) -> float:
@@ -35,6 +41,24 @@ class PlaywrightChecks:
             property="playwright.dom.textContent", expected=expected,
             assertion=lambda: expect(locator).to_have_text(expected, timeout=self.timeout_millis),
             reading=lambda: CheckReading.value(locator.text_content(timeout=self.timeout_millis)))
+
+    def record_result(self, rule_id: str, name: str, status: str, error: str | None = None) -> None:
+        """Record an already executed check against the latest captured observation."""
+        self._recording_error = None
+        self._evidence._require_active()
+        details = {} if error is None else {"playwright.assertion_error": error}
+        rule = CheckRule(rule_id)
+        EvidenceEvent("validation:event", "checked", CheckResult(self._evidence.run_id, name, rule,
+            CheckTarget.run(), status, actual=CheckReading.unknown(), details=details)).to_dict()
+        self._evidence._busy = True
+        try:
+            self._evidence._record_check(name, rule, None, None, UNSPECIFIED, status,
+                CheckReading.unknown(), details, reuse_capture=True)
+        except Exception as recording:
+            self._recording_error = recording
+            raise
+        finally:
+            self._evidence._busy = False
 
     def has_value(self, rule_id: str, name: str, locator: Locator, expected: str) -> None:
         self._require_string(expected, "Expected value")
@@ -61,9 +85,13 @@ class PlaywrightChecks:
 
     def evaluate(self, name: str, *, rule: CheckRule, assertion: Callable[[], Any],
                  reading: Callable[[], CheckReading], locator: Locator | None = None,
-                 property: str | None = None, expected: Any = UNSPECIFIED) -> None:
+                 property: str | None = None, expected: Any = UNSPECIFIED,
+                 redact_error: bool = False) -> None:
         """Record one oracle result and rethrow its original failure after recording."""
+        self._recording_error = None
         self._evidence._require_active()
+        if type(redact_error) is not bool:
+            raise TypeError("redact_error must be a boolean")
         if not callable(assertion) or not callable(reading):
             raise TypeError("Assertion and reading must be callable")
         if property is not None:
@@ -78,34 +106,42 @@ class PlaywrightChecks:
         details = {}
         self._evidence._busy = True
         try:
-            try:
-                assertion()
-            except AssertionError as error:
-                status = "failed"
-                failure = error
-            except Exception as error:
-                status = "error"
-                failure = error
-            if failure is not None:
-                details["playwright.assertion_error"] = str(failure)
-            try:
-                actual = reading()
-                if not isinstance(actual, CheckReading):
-                    raise TypeError("A reading must return CheckReading")
-                actual.to_dict()
-            except Exception as error:
-                actual = CheckReading.unknown()
-                details["playwright.reading_error"] = str(error)
-            try:
-                self._evidence._record_check(name, rule, locator, property, expected, status, actual, details)
-            except Exception as recording:
-                if failure is None:
-                    raise
-                failure.add_note("Evidence recording also failed: " + str(recording))
-            if failure is not None:
-                raise failure
+            with self._evidence._recording_scope():
+                try:
+                    assertion()
+                except AssertionError as error:
+                    status = "failed"
+                    failure = error
+                except Exception as error:
+                    status = "error"
+                    failure = error
+                if failure is not None:
+                    details["playwright.assertion_error"] = self._error_text(failure, redact_error)
+                try:
+                    actual = reading()
+                    if not isinstance(actual, CheckReading):
+                        raise TypeError("A reading must return CheckReading")
+                    actual.to_dict()
+                except Exception as error:
+                    actual = CheckReading.unknown()
+                    details["playwright.reading_error"] = self._error_text(error, redact_error)
+                try:
+                    self._evidence._record_check(name, rule, locator, property, expected, status, actual, details)
+                except Exception as recording:
+                    self._recording_error = recording
+                    if failure is None:
+                        raise
+                    failure.add_note("Evidence recording also failed: " + str(recording))
+                if failure is not None:
+                    raise failure
         finally:
             self._evidence._busy = False
+
+    @staticmethod
+    def _error_text(error: Exception, redact: bool) -> str:
+        if redact:
+            return type(error).__name__ + ": details omitted because the assertion concerns a secret value"
+        return str(error)
 
     def _rule(self, identity: str, comparison: str, parameters: dict | None = None) -> CheckRule:
         return CheckRule(identity, "1", {"comparison": comparison,

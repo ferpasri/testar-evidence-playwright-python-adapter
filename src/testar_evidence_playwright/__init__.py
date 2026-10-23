@@ -1,9 +1,11 @@
-"""Record synchronous Playwright scripts as portable execution evidence."""
+"""Capture concrete GUI evidence from synchronous Playwright tests."""
 
+from ._metadata import VERSION
 from .capture import CaptureOptions
 from .checks import PlaywrightChecks
 from .evidence import PlaywrightEvidence
+from .facade import evidence_for, sync_playwright
+from .facade_assertions import expect
 
-__version__ = "0.2.1"
-
-__all__ = ["CaptureOptions", "PlaywrightChecks", "PlaywrightEvidence", "__version__"]
+__version__ = VERSION
+__all__ = ["CaptureOptions", "PlaywrightChecks", "PlaywrightEvidence", "evidence_for", "expect", "sync_playwright"]
