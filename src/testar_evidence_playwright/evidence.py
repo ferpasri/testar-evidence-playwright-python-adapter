@@ -14,29 +14,30 @@ from uuid import uuid4
 
 from playwright.sync_api import Error as PlaywrightError, Locator, Page
 from testar_evidence import (
-    ActionCandidate as CandidateBinding, ActionDefinition, CheckReading, CheckResult, CheckRule, CheckTarget,
-    ConcreteState, EvidenceEvent, Execution, JsonlStore, Manifest, Observation, Run,
+    UNSPECIFIED, AvailableAction as AvailableActionBinding, ActionDescription, ObservedValue, OracleResult, Oracle, OracleTarget,
+    RecordedState, EvidenceEvent, ActionExecution, ActionExecutionResult, JsonlStore, Manifest, Observation, OracleSeverity, TestRun, TestSequence,
 )
 
 from ._metadata import VERSION as VERSION, run_properties
 from .capture import BrowserSnapshot, CaptureOptions, capture_page, identity, target_path
 from .checks import PlaywrightChecks
+from testar_evidence.codec import dumps
 
 
 @dataclass(frozen=True)
-class ActionCandidate:
-    """An action candidate reported by a tool, including its planning parameters."""
-    kind: str
+class AvailableAction:
+    """An available action reported by a caller, including its planning parameters."""
+    action_type: str
     name: str
     locator: Locator | None = None
     parameters: dict[str, Any] = field(default_factory=dict)
 
-    def definition(self) -> ActionDefinition:
+    def description(self) -> ActionDescription:
         description = self.name if self.locator is None else str(self.locator)
-        parameters = EvidenceEvent("validation:event", "action_defined",
-            ActionDefinition("validation:action", self.kind, self.parameters)).to_dict()["event"]["data"]["properties"]
-        return ActionDefinition("playwright:available:" + identity(json.dumps(
-            [self.kind, self.name, description, parameters], sort_keys=True)), self.kind,
+        parameters = EvidenceEvent("validation:event", "action_described",
+            ActionDescription("validation:action", self.action_type, self.parameters)).to_dict()["event"]["data"]["properties"]
+        return ActionDescription("playwright:available:" + identity(dumps(
+            [self.action_type, self.name, description, parameters], sort_keys=True)), self.action_type,
             {"playwright.description": self.name, "playwright.locator": description,
              "playwright.available_parameters": parameters})
 
@@ -44,11 +45,11 @@ class ActionCandidate:
 @dataclass
 class _PendingObservation:
     id: str
-    sequence: int
+    observation_index: int
     snapshot: BrowserSnapshot
-    checks: list[CheckResult] = field(default_factory=list)
-    candidates: list[CandidateBinding] | None = None
-    candidate_scope: str = "unknown"
+    oracle_results: list[OracleResult] = field(default_factory=list)
+    available_actions: list[AvailableActionBinding] | None = None
+    available_action_scope: str = "unknown"
 
 
 class PlaywrightEvidence:
@@ -59,9 +60,10 @@ class PlaywrightEvidence:
         self._options = options
         self._store = store
         self._run_id = run_id
+        self._sequence_id = run_id + ":sequence:1"
         self._thread = get_ident()
         self._checks = PlaywrightChecks(self)
-        self._definitions = {}
+        self._descriptions = {}
         self._events = 0
         self._observations = 0
         self._executions = 0
@@ -79,23 +81,27 @@ class PlaywrightEvidence:
     @classmethod
     def start(cls, directory: str | Path, page: Page, options: CaptureOptions | None = None,
               properties: dict[str, Any] | None = None, *, origin: str | None = None,
-              test_objective: str | None = None) -> PlaywrightEvidence:
+              test_objective: str | None = None, sequence_index: int = 1) -> PlaywrightEvidence:
         """Create a new trace at the exact supplied directory, preserving existing files."""
         if page is None:
             raise TypeError("A synchronous Playwright page is required")
         options = CaptureOptions() if options is None else options
         if not isinstance(options, CaptureOptions):
             raise TypeError("options must be CaptureOptions")
+        if type(sequence_index) is not int or not 1 <= sequence_index < (1 << 64):
+            raise ValueError("Sequence index must be a positive unsigned 64-bit integer")
         supplied = run_properties(properties, origin=origin, test_objective=test_objective)
         supplied["playwright.initial_url"] = page.url
         identifier = uuid4().hex
         run_id = "playwright-python:run:" + identifier
-        run = Run(run_id, "playwright-python", identifier, supplied)
-        EvidenceEvent("validation:event", "run_started", run).to_dict()
-        store = JsonlStore.create(directory, Manifest("playwright-python:model:" + identifier))
+        run = TestRun(run_id, "playwright-python", identifier, supplied)
+        EvidenceEvent("validation:event", "test_run_started", run).to_dict()
+        store = JsonlStore.create(directory, Manifest("playwright-python:evidence:" + identifier))
         evidence = cls(page, options, store, run_id)
         try:
-            evidence._emit("run_started", run)
+            evidence._emit("test_run_started", run)
+            evidence._emit("test_sequence_started", TestSequence(evidence.sequence_id, run_id,
+                sequence_index, str(sequence_index)))
         except BaseException:
             store.close()
             raise
@@ -109,14 +115,14 @@ class PlaywrightEvidence:
         """Reserve a timestamped trace directory beneath the supplied parent."""
         if not isinstance(sut, str) or not sut.strip():
             raise ValueError("SUT label must be a nonblank string")
-        if sequence is not None and (type(sequence) is not int or sequence < 1):
+        if sequence is not None and (type(sequence) is not int or not 1 <= sequence < (1 << 64)):
             raise ValueError("Sequence must be a positive integer")
         supplied = run_properties(properties, origin=origin, test_objective=test_objective)
         directory = _trace_directory(Path(parent), sut, supplied.get("evidence.test_objective", "run"), sequence)
         supplied["playwright.sut"] = sut
         if sequence is not None:
             supplied["playwright.sequence"] = sequence
-        return cls.start(directory, page, options, supplied)
+        return cls.start(directory, page, options, supplied, sequence_index=sequence or 1)
 
     @property
     def directory(self) -> Path:
@@ -125,6 +131,10 @@ class PlaywrightEvidence:
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @property
+    def sequence_id(self) -> str:
+        return self._sequence_id
 
     @property
     def checks(self) -> PlaywrightChecks:
@@ -150,71 +160,71 @@ class PlaywrightEvidence:
         return self.perform("fill", "Fill " + str(locator), locator,
             {**options, "playwright.redacted_parameters": ["value"]}, lambda: locator.fill(value, **options))
 
-    def record_candidates(self, actions: list[ActionCandidate], *, scope: str = "generated") -> str:
-        """Capture a visit with the action candidates a tool reports, including an empty list."""
+    def record_available_actions(self, actions: list[AvailableAction], *, scope: str = "generated") -> str:
+        """Capture a visit with the available actions a tool reports, including an empty list."""
         self._require_active()
         if self._selected_execution is not None:
-            raise RuntimeError("Report the selected action's outcome before recording action candidates")
+            raise RuntimeError("Report the selected action's outcome before recording available actions")
         if scope not in {"generated", "eligible", "unknown"}:
-            raise ValueError("Candidate scope must be generated, eligible, or unknown")
-        if not isinstance(actions, list) or not all(isinstance(action, ActionCandidate) for action in actions):
-            raise TypeError("Actions must be a list of ActionCandidate values")
-        definitions = [action.definition() for action in actions]
+            raise ValueError("Available-action scope must be generated, eligible, or unknown")
+        if not isinstance(actions, list) or not all(isinstance(action, AvailableAction) for action in actions):
+            raise TypeError("Actions must be a list of AvailableAction values")
+        description_records = [action.description() for action in actions]
         self._busy = True
         try:
             if self._pending is not None:
                 self._flush()
             self._ensure_pending()
-            candidates = []
+            available_actions = []
             resolved = {}
             with self._recording_scope():
-                for action, definition in zip(actions, definitions):
+                for action, description_record in zip(actions, description_records):
                     description = None if action.locator is None else str(action.locator)
                     if description not in resolved:
                         widget = self._pending.snapshot.widget_at(target_path(action.locator))
                         resolved[description] = None if widget is None else widget.id
-                    candidate = CandidateBinding(definition.id, resolved[description])
-                    if candidate not in candidates:
-                        candidates.append(candidate)
-            for definition in definitions:
-                self._define_action(definition)
-            self._pending.candidates = candidates
-            self._pending.candidate_scope = scope
+                    available_action = AvailableActionBinding(description_record.id, resolved[description])
+                    if available_action not in available_actions:
+                        available_actions.append(available_action)
+            for description_record in description_records:
+                self._describe_action(description_record)
+            self._pending.available_actions = available_actions
+            self._pending.available_action_scope = scope
             return self._pending.id
         finally:
             self._busy = False
 
-    def select_action(self, kind: str, name: str, locator: Locator | None,
-                      parameters: dict[str, Any], *, candidate: ActionCandidate | None = None) -> str:
+    def select_action(self, action_type: str, name: str, locator: Locator | None,
+                      parameters: dict[str, Any], *, available_action: AvailableAction | None = None) -> str:
         """Record the selected action before the caller executes it."""
         self._require_active()
         if self._selected_execution is not None:
             raise RuntimeError("Report the selected action's outcome before selecting another")
         description = name if locator is None else str(locator)
-        definition = ActionDefinition("playwright:action:" + identity(json.dumps([kind, name, description])),
-            kind, {"playwright.description": name, "playwright.locator": description})
-        if candidate is not None:
-            if not isinstance(candidate, ActionCandidate):
-                raise TypeError("candidate must be ActionCandidate")
-            if (kind, name, description) != (candidate.kind, candidate.name,
-                    candidate.name if candidate.locator is None else str(candidate.locator)):
-                raise ValueError("Selected action must match its candidate description")
-            definition = candidate.definition()
-        EvidenceEvent("validation:event", "action_defined", definition).to_dict()
+        description_record = ActionDescription("playwright:action:" + identity(json.dumps([action_type, name, description])),
+            action_type, {"playwright.description": name, "playwright.locator": description})
+        if available_action is not None:
+            if not isinstance(available_action, AvailableAction):
+                raise TypeError("available_action must be AvailableAction")
+            if (action_type, name, description) != (available_action.action_type, available_action.name,
+                    available_action.name if available_action.locator is None else str(available_action.locator)):
+                raise ValueError("Selected action must match its available-action description")
+            description_record = available_action.description()
+        EvidenceEvent("validation:event", "action_described", description_record).to_dict()
         # Validate and copy arguments before any action can affect the application.
         prepared = EvidenceEvent("validation:event", "action_selected",
-            Execution("validation:execution", self.run_id, "validation:observation", definition.id,
+            ActionExecution("validation:execution", self.sequence_id, "validation:observation", description_record.id,
                 parameters=parameters)).to_dict()["event"]["data"]["parameters"]
         self._busy = True
         try:
             self._ensure_pending()
             with self._recording_scope():
                 widget = self._pending.snapshot.widget_at(target_path(locator))
-            if candidate is not None and self._pending.candidates is not None:
-                binding = next((item for item in self._pending.candidates if item.action == definition.id), None)
+            if available_action is not None and self._pending.available_actions is not None:
+                binding = next((item for item in self._pending.available_actions if item.action_description == description_record.id), None)
                 if binding is None:
                     raise ValueError("Selected action was not reported for this observation")
-                widget = next((item for item in self._pending.snapshot.widgets if item.id == binding.target), None)
+                widget = next((item for item in self._pending.snapshot.widgets if item.id == binding.target_widget), None)
             if locator is not None:
                 prepared["playwright.locator"] = description
                 prepared["playwright.target_resolution"] = "not_captured" if widget is None else "captured_dom_path"
@@ -228,10 +238,10 @@ class PlaywrightEvidence:
                         prepared.pop(parameter)
                     previous = prepared.get("playwright.redacted_parameters", [])
                     prepared["playwright.redacted_parameters"] = sorted(set(previous) | secret_parameters)
-            source = self._flush(definition, None if widget is None else widget.id)
+            source = self._flush(description_record, None if widget is None else widget.id)
             self._executions += 1
             execution = self.run_id + ":execution:" + str(self._executions)
-            self._emit("action_selected", Execution(execution, self.run_id, source, definition.id,
+            self._emit("action_selected", ActionExecution(execution, self.sequence_id, source, description_record.id,
                 None if widget is None else widget.id, prepared))
             self._selected_execution = execution
             self._selected_parameters = prepared
@@ -239,32 +249,32 @@ class PlaywrightEvidence:
         finally:
             self._busy = False
 
-    def submit_action(self, accepted: bool, error: str | None = None) -> None:
-        """Report the execution outcome returned by the caller's tool."""
+    def report_action_result(self, outcome: str, error: str | None = None) -> None:
+        """Report whether the selected operation returned normally or raised an error."""
         self._require_active()
-        self._submit_action(accepted, error)
+        self._report_action_result(outcome, error)
 
-    def _submit_action(self, accepted: bool, error: str | None = None) -> None:
+    def _report_action_result(self, outcome: str, error: str | None = None) -> None:
         execution = self._selected_execution
         if execution is None:
             raise RuntimeError("No selected action is awaiting an outcome")
-        submission = {"execution": execution, "accepted": accepted, "error": error}
-        EvidenceEvent("validation:event", "action_submitted", submission).to_dict()
-        self._emit("action_submitted", submission)
+        result = ActionExecutionResult(execution, outcome, error)
+        EvidenceEvent("validation:event", "action_execution_reported", result).to_dict()
+        self._emit("action_execution_reported", result)
         self._selected_execution = None
         self._selected_parameters = None
-        if accepted:
+        if outcome == "returned":
             self._pending_result = execution
         else:
             self._ending_reason = "action_failed"
 
-    def perform(self, kind: str, name: str, locator: Locator | None,
+    def perform(self, action_type: str, name: str, locator: Locator | None,
                 parameters: dict[str, Any], operation: Callable[[], Any], *,
-                candidate: ActionCandidate | None = None) -> Any:
+                available_action: AvailableAction | None = None) -> Any:
         """Record one action, its actual arguments, and its returned or raised outcome."""
         if not callable(operation):
             raise TypeError("Action operation must be callable")
-        self.select_action(kind, name, locator, parameters, candidate=candidate)
+        self.select_action(action_type, name, locator, parameters, available_action=available_action)
         self._busy = True
         try:
             try:
@@ -273,11 +283,11 @@ class PlaywrightEvidence:
             except BaseException as error:
                 self._ending_reason = "action_failed"
                 try:
-                    self._submit_action(False, self._action_error(error, self._selected_parameters))
+                    self._report_action_result("error", self._action_error(error, self._selected_parameters))
                 except Exception as recording:
                     error.add_note("Evidence recording also failed: " + str(recording))
                 raise
-            self._submit_action(True)
+            self._report_action_result("returned")
             return result
         finally:
             self._busy = False
@@ -311,13 +321,13 @@ class PlaywrightEvidence:
     def finish(self, reason: str = "completed", *, capture_final: bool = True) -> None:
         """Finish the run, using only saved captures when the page is no longer available."""
         if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("Run-ending reason must be nonblank text")
+            raise ValueError("TestRun-ending reason must be nonblank text")
         if type(capture_final) is not bool:
             raise TypeError("capture_final must be a boolean")
         if self._finished:
             return
         self._require_active()
-        EvidenceEvent("validation:event", "run_finished", {"run": self.run_id, "reason": reason}).to_dict()
+        EvidenceEvent("validation:event", "test_run_finished", {"test_run": self.run_id, "reason": reason}).to_dict()
         self._busy = True
         try:
             if self._pending is None and capture_final and \
@@ -325,7 +335,8 @@ class PlaywrightEvidence:
                 self._ensure_pending()
             if self._pending is not None:
                 self._flush()
-            self._emit("run_finished", {"run": self.run_id, "reason": reason})
+            self._emit("test_sequence_finished", {"test_sequence": self.sequence_id, "reason": reason})
+            self._emit("test_run_finished", {"test_run": self.run_id, "reason": reason})
             self._finished = True
         finally:
             self._busy = False
@@ -351,7 +362,7 @@ class PlaywrightEvidence:
     def __exit__(self, exception_type, exception, traceback) -> None:
         if exception is not None and self._selected_execution is not None and not self._broken:
             try:
-                self.submit_action(False, self._action_error(exception, self._selected_parameters))
+                self.report_action_result("error", self._action_error(exception, self._selected_parameters))
             except Exception as recording:
                 exception.add_note("Evidence recording also failed: " + str(recording))
         if exception is not None and self._ending_reason == "closed":
@@ -363,9 +374,10 @@ class PlaywrightEvidence:
                 raise
             exception.add_note("Evidence cleanup also failed: " + str(cleanup))
 
-    def _record_check(self, name: str, rule: CheckRule, locator: Locator | None,
+    def _record_oracle_result(self, name: str, oracle: Oracle, locator: Locator | None,
                       property: str | None, expected: Any, status: str,
-                      actual: CheckReading, details: dict[str, Any], *, reuse_capture: bool = False) -> None:
+                      actual: ObservedValue, details: dict[str, Any], *, reuse_capture: bool = False,
+                      oracle_severity: OracleSeverity | Any = UNSPECIFIED) -> None:
         if status in {"failed", "error"}:
             self._ending_reason = "check_failed"
         if self._pending is not None and not reuse_capture:
@@ -375,18 +387,19 @@ class PlaywrightEvidence:
             widget = self._pending.snapshot.widget_at(target_path(locator))
         details = dict(details)
         if locator is None:
-            target = CheckTarget.observation(self._pending.id) if property is None else \
-                CheckTarget.state_property(self._pending.id, property)
+            target = OracleTarget.observation(self._pending.id) if property is None else \
+                OracleTarget.state_property(self._pending.id, property)
         elif widget is not None:
-            target = CheckTarget.widget(self._pending.id, widget.id) if property is None else \
-                CheckTarget.widget_property(self._pending.id, widget.id, property)
+            target = OracleTarget.widget(self._pending.id, widget.id) if property is None else \
+                OracleTarget.widget_property(self._pending.id, widget.id, property)
         else:
-            target = CheckTarget.observation(self._pending.id)
+            target = OracleTarget.observation(self._pending.id)
             details["playwright.requested_target"] = {"locator": str(locator), "property": property or ""}
             details["playwright.target_resolution"] = "The locator did not identify a captured top-document widget."
-        check = CheckResult(self.run_id, name, rule, target, status, expected, actual, details)
-        EvidenceEvent("validation:event", "checked", check).to_dict()
-        self._pending.checks.append(check)
+        check = OracleResult(self.run_id, name, oracle, target, status, test_sequence=self.sequence_id,
+            expected_value=expected, observed_value=actual, oracle_details=details, oracle_severity=oracle_severity)
+        EvidenceEvent("validation:event", "oracle_result_recorded", check).to_dict()
+        self._pending.oracle_results.append(check)
 
     def _ensure_pending(self) -> None:
         if self._pending is None:
@@ -396,14 +409,14 @@ class PlaywrightEvidence:
             self._pending = _PendingObservation(self.run_id + ":observation:" + str(self._observations),
                 self._observations, snapshot)
 
-    def _flush(self, definition: ActionDefinition | None = None, target: str | None = None) -> str:
+    def _flush(self, description_record: ActionDescription | None = None, target: str | None = None) -> str:
         pending = self._pending
-        candidates = [] if pending.candidates is None else list(pending.candidates)
-        if definition is not None:
-            self._define_action(definition)
-            selected = CandidateBinding(definition.id, target)
-            if selected not in candidates:
-                candidates.append(selected)
+        available_actions = [] if pending.available_actions is None else list(pending.available_actions)
+        if description_record is not None:
+            self._describe_action(description_record)
+            selected = AvailableActionBinding(description_record.id, target)
+            if selected not in available_actions:
+                available_actions.append(selected)
         artifacts = []
         if pending.snapshot.screenshot is not None:
             try:
@@ -411,31 +424,31 @@ class PlaywrightEvidence:
             except BaseException:
                 self._broken = True
                 raise
-        state = ConcreteState(pending.id + ":snapshot", pending.snapshot.properties,
+        state = RecordedState(pending.id + ":state", pending.snapshot.properties,
             pending.snapshot.widgets, "filtered")
-        self._emit("observed", Observation(pending.id, self.run_id, pending.sequence,
-            pending.snapshot.timestamp_micros, state, candidates, pending.candidate_scope, artifacts))
+        self._emit("observation_recorded", Observation(pending.id, self.sequence_id, pending.observation_index,
+            pending.snapshot.timestamp_micros, state, pending.available_action_scope, available_actions, artifacts))
         self._last_observation = pending.id
         self._pending = None
         if self._pending_result is not None:
-            self._emit("action_result", {"execution": self._pending_result, "observation": pending.id})
+            self._emit("transition_recorded", {"action_execution": self._pending_result, "resulting_observation": pending.id})
             self._pending_result = None
-        for check in pending.checks:
-            self._emit("checked", check)
+        for check in pending.oracle_results:
+            self._emit("oracle_result_recorded", check)
         return pending.id
 
-    def _define_action(self, definition: ActionDefinition) -> None:
-        previous = self._definitions.get(definition.id)
-        if previous is not None and previous != definition:
-            raise ValueError("Conflicting action definition: " + definition.id)
+    def _describe_action(self, description_record: ActionDescription) -> None:
+        previous = self._descriptions.get(description_record.id)
+        if previous is not None and previous != description_record:
+            raise ValueError("Conflicting action description: " + description_record.id)
         if previous is None:
-            self._emit("action_defined", definition)
-            self._definitions[definition.id] = definition
+            self._emit("action_described", description_record)
+            self._descriptions[description_record.id] = description_record
 
-    def _emit(self, kind: str, data: Any) -> None:
+    def _emit(self, event_type: str, data: Any) -> None:
         sequence = self._events + 1
         try:
-            if not self._store.record(EvidenceEvent(self.run_id + ":event:" + str(sequence), kind, data)):
+            if not self._store.record(EvidenceEvent(self.run_id + ":event:" + str(sequence), event_type, data)):
                 raise RuntimeError("Duplicate recorder event")
         except BaseException:
             self._broken = True

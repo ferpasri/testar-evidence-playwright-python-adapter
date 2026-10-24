@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from playwright.sync_api import ElementHandle
-from testar_evidence import CheckReading, CheckRule, EvidenceReader, Widget
+from testar_evidence import ObservedValue, Oracle, EvidenceReader, Widget
 from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence
 from testar_evidence_playwright.capture import BrowserSnapshot
 from testar_evidence_playwright.facade_actions import describe_action
@@ -62,7 +62,7 @@ class FacadeRecorderTests(unittest.TestCase):
             self.assertEqual("native result", evidence.perform("click", "Click", None, {}, operation))
             self.assertFalse(self.runtime.is_suspended)
         self.assertEqual(["executed"], calls)
-        self.assertEqual(1, len(EvidenceReader.read(self.directory).executions))
+        self.assertEqual(1, len(EvidenceReader.read(self.directory).action_executions))
 
     def test_explicit_assertion_and_reading_run_inside_one_suppressed_scope(self):
         def assertion():
@@ -70,13 +70,13 @@ class FacadeRecorderTests(unittest.TestCase):
 
         def reading():
             self.assertTrue(self.runtime.is_suspended)
-            return CheckReading.value("Ready")
+            return ObservedValue.value("Ready")
 
         with self.start() as evidence:
-            evidence.checks.evaluate("Ready", rule=CheckRule("fixture:ready"),
-                assertion=assertion, reading=reading)
+            evidence.checks.evaluate("Ready", oracle=Oracle("fixture:ready"),
+                assertion=assertion, observed_value=reading)
             self.assertFalse(self.runtime.is_suspended)
-        self.assertEqual("passed", EvidenceReader.read(self.directory).checks[0]["status"])
+        self.assertEqual("passed", EvidenceReader.read(self.directory).oracle_results[0]["oracle_status"])
 
     def test_finishing_after_page_close_flushes_a_cached_result_without_capturing(self):
         with self.start() as evidence:
@@ -87,9 +87,9 @@ class FacadeRecorderTests(unittest.TestCase):
                     side_effect=AssertionError("The page has already closed")):
                 evidence.finish("page_closed", capture_final=False)
             self.assertEqual(captures, self.capture.call_count)
-        model = EvidenceReader.read(self.directory)
-        self.assertEqual(1, len(model.links()))
-        self.assertEqual("page_closed", next(iter(model.runs.values()))["reason"])
+        evidence = EvidenceReader.read(self.directory)
+        self.assertEqual(1, len(evidence.recorded_transitions))
+        self.assertEqual("page_closed", next(iter(evidence.test_runs.values()))["reason"])
 
     def test_finishing_without_a_result_capture_preserves_an_incomplete_execution(self):
         with self.start() as evidence:
@@ -97,9 +97,9 @@ class FacadeRecorderTests(unittest.TestCase):
             captures = self.capture.call_count
             evidence.finish("page_closed", capture_final=False)
             self.assertEqual(captures, self.capture.call_count)
-        model = EvidenceReader.read(self.directory)
-        self.assertEqual("incomplete", next(iter(model.executions.values()))["status"])
-        self.assertEqual([], model.links())
+        evidence = EvidenceReader.read(self.directory)
+        self.assertEqual("incomplete", next(iter(evidence.action_executions.values()))["status"])
+        self.assertEqual([], evidence.recorded_transitions)
 
     def test_finishing_an_uncaptured_page_records_no_invented_observation(self):
         with self.start() as evidence:
@@ -118,15 +118,15 @@ class FacadeRecorderTests(unittest.TestCase):
 
         with self.start() as evidence:
             with self.assertRaises(AssertionError) as caught:
-                evidence.checks.evaluate("Password", rule=CheckRule("fixture:password"),
-                    assertion=assertion, reading=reading, redact_error=True)
+                evidence.checks.evaluate("Password", oracle=Oracle("fixture:password"),
+                    assertion=assertion, observed_value=reading, redact_error=True)
             self.assertIs(failure, caught.exception)
         text = (self.directory / "evidence.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("secret-password", text)
-        check = EvidenceReader.read(self.directory).checks[0]
-        self.assertEqual("failed", check["status"])
-        self.assertIn("AssertionError", check["details"]["playwright.assertion_error"])
-        self.assertIn("RuntimeError", check["details"]["playwright.reading_error"])
+        check = EvidenceReader.read(self.directory).oracle_results[0]
+        self.assertEqual("failed", check["oracle_status"])
+        self.assertIn("AssertionError", check["oracle_details"]["playwright.assertion_error"])
+        self.assertIn("RuntimeError", check["oracle_details"]["playwright.reading_error"])
         self.assertFalse(self.runtime.is_suspended)
 
     def test_password_keys_and_invalid_call_arguments_are_redacted(self):
@@ -139,8 +139,8 @@ class FacadeRecorderTests(unittest.TestCase):
                 evidence.perform("press", "Type password", locator, parameters, lambda: None)
         text = (self.directory / "evidence.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("secret-password", text)
-        execution = next(iter(EvidenceReader.read(self.directory).executions.values()))
-        saved = execution["execution"]["parameters"]
+        execution = next(iter(EvidenceReader.read(self.directory).action_executions.values()))
+        saved = execution["action_execution"]["parameters"]
         self.assertEqual(sorted(parameters), saved["playwright.redacted_parameters"])
 
     def test_unresolved_value_target_is_redacted(self):
@@ -163,17 +163,17 @@ class FacadeRecorderTests(unittest.TestCase):
             self.assertIs(failure, caught.exception)
         text = (self.directory / "evidence.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("secret-password", text)
-        execution = next(iter(EvidenceReader.read(self.directory).executions.values()))
-        self.assertEqual("rejected", execution["status"])
-        self.assertIn("details omitted", execution["error"])
+        execution = next(iter(EvidenceReader.read(self.directory).action_executions.values()))
+        self.assertEqual("failed", execution["status"])
+        self.assertIn("details omitted", execution["execution_result"]["error"])
 
     def test_nonpassword_input_arguments_remain_available(self):
         locator = SimpleNamespace(count=lambda: 1, evaluate=lambda *_args, **_options: False)
         with patch("testar_evidence_playwright.evidence.target_path", return_value=None):
             with self.start() as evidence:
                 evidence.perform("press", "Type a key", locator, {"key": "ArrowDown"}, lambda: None)
-        execution = next(iter(EvidenceReader.read(self.directory).executions.values()))
-        self.assertEqual("ArrowDown", execution["execution"]["parameters"]["key"])
+        execution = next(iter(EvidenceReader.read(self.directory).action_executions.values()))
+        self.assertEqual("ArrowDown", execution["action_execution"]["parameters"]["key"])
 
 
 if __name__ == "__main__":

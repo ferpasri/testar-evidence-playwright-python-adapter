@@ -1,130 +1,83 @@
 # How the Playwright Python adapter works
 
-A script describes its test. Playwright operates the browser. The adapter records supported operations, captured pages, and final test-oracle results. The generic evidence library writes the portable files.
+Playwright controls the browser. The adapter records supported operations and final oracle results. The independent evidence library validates and saves the generic records.
 
 ```text
-Your Python script
-    -> synchronous Playwright facade
-    -> PlaywrightEvidence: action and recording boundaries
-    -> PlaywrightChecks: assertions and their results
-    -> capture_page + JavaScript: properties and screenshots
-    -> testar-evidence-python: validation and portable files
+Python script -> Playwright facade -> page recorder and checks -> DOM capture -> evidence library
 ```
 
-## The components
+## Components
 
 | Component | What it does |
 | --- | --- |
-| [`sync_api.py`](../src/testar_evidence_playwright/sync_api.py) | Provides `sync_playwright`, `expect`, and `evidence_for` alongside native Playwright API types. |
-| [`facade.py`](../src/testar_evidence_playwright/facade.py) | Connects native browser objects to their page's recorder, delegates operations, and finishes traces as pages and browsers close. |
-| [`facade_actions.py`](../src/testar_evidence_playwright/facade_actions.py) | Describes supported browser actions and their supplied parameters. |
-| [`facade_assertions.py`](../src/testar_evidence_playwright/facade_assertions.py) | Delegates Playwright assertions and identifies their recorded targets, expected values, and readings. |
-| [`evidence.py`](../src/testar_evidence_playwright/evidence.py): `PlaywrightEvidence` | Starts a run, records action boundaries, connects observations to executions, and finishes the run. It also exposes the explicit recording API. |
-| [`checks.py`](../src/testar_evidence_playwright/checks.py): `PlaywrightChecks` | Runs wrapped test oracles and records their expected value, final reading, status, and target. |
-| [`capture.py`](../src/testar_evidence_playwright/capture.py): `CaptureOptions` | Configures collection limits, selected computed styles, excluded attributes, and screenshots. |
-| `capture_page` and `BrowserSnapshot` in `capture.py` | Read the page and hold its captured properties, widget hierarchy, timestamp, and screenshot. |
-| [`capture.js`](../src/testar_evidence_playwright/resources/capture.js) | Runs in the page to read document and element properties, capture descriptions, and known omissions. |
-| [`target.js`](../src/testar_evidence_playwright/resources/target.js) | Finds a locator's structural DOM path so it can be matched to a captured widget. |
+| `sync_api.py` | Provides `sync_playwright`, `expect`, and `evidence_for` alongside native Playwright API types. |
+| `facade.py` | Delegates native calls, follows returned objects and callbacks, and owns each page's recorder. |
+| `facade_actions.py` | Describes supported operations and the arguments to record. |
+| `facade_assertions.py` | Delegates retrying assertions and identifies their expected/observed values and targets. |
+| `PlaywrightEvidence` in `evidence.py` | Starts run and sequence, records actions and transitions, and finishes the histories. |
+| `AvailableAction` in `evidence.py` | Describes a caller-reported choice and its planning parameters. |
+| `PlaywrightChecks` in `checks.py` | Runs a test oracle or records an existing result with optional details and severity. |
+| `CaptureOptions`, `BrowserSnapshot`, and `capture_page` | Configure capture and hold one captured page, hierarchy, timestamp, and screenshot. |
+| `capture.js` / `target.js` | Read DOM properties and find a locator's structural path. |
 
-## The minimal script integration
+## Minimal integration
 
-Change the Playwright imports and configure recording when starting Playwright:
+Import `sync_playwright` and `expect` from `testar_evidence_playwright.sync_api`, configure recording once, and keep the ordinary Playwright operations. Pages and locators retain their native API behavior. The facade records supported actions and final Playwright assertions; ordinary Python assertions and custom tool callbacks use explicit reporting.
 
-```python
-from testar_evidence_playwright.sync_api import sync_playwright, expect
+The [facade example](../examples/parabank_facade.py) shows the loan-denial scenario. The [explicit example](../examples/parabank_denied_loan.py) uses caller-defined boundaries.
 
-with sync_playwright(
-    evidence_path="target/traces",
-    sut="parabank",
-    test_objective="denied-loan",
-) as playwright:
-    browser = playwright.chromium.launch(channel="chrome", headless=True)
-    page = browser.new_page()
-    page.goto("https://para.testar.org/")
-    page.locator("input[name='username']").fill("john")
-    browser.close()
-```
+## Additional information from a caller
 
-The adapter delegates operations to the real Playwright library. A page remains a native Playwright `Page`; locators remain native `Locator` objects. The adapter follows objects returned by calls, chained locators, and event callbacks. It keeps a separate trace for each page.
-
-Use the adapter's `expect` for automatic recording of page and locator assertions. Native Playwright still decides whether an assertion passes and how to retry it. Readings such as `page.title()` and `locator.count()` do not themselves record test-oracle results.
-
-## Identifying the run
-
-Optional `origin` and `test_objective` arguments describe the caller and its test intent. They are saved once on the run using `evidence.origin` and `evidence.test_objective`. The adapter records its identifier and version automatically. When a description is omitted, its property stays absent; recording still works. A generic filename label only helps name the directory. See [run metadata](SPEC.md#run-metadata).
-
-## Following one click and assertion
-
-Consider these ordinary Playwright calls:
+Use `evidence_for(page)` to access the existing facade recorder. A caller can report choices, compound actions, and custom oracle results in the same trace:
 
 ```python
-page.get_by_role("button", name="Apply Now", exact=True).click()
-expect(page.locator("#loanStatus")).to_have_text("Denied")
-```
-
-1. Before the click, the recorder uses the latest pending capture or captures the page. `capture.js` collects properties; `capture_page` converts them into generic widgets and optionally takes a screenshot.
-2. `target.js` identifies the button's DOM path. The adapter finds the corresponding captured widget when possible.
-3. The adapter records the source observation with the chosen action as its candidate, records selection, and delegates the click. It records accepted submission on return, or rejected submission with the operation's error on exception.
-4. A resulting capture completes the accepted action's state-action-state link.
-5. Playwright runs the assertion, including retries. The adapter records one final outcome, reads the mapped text property, and captures the page for that evaluation.
-6. At the next action or trace ending, the adapter writes the pending observation and evaluation.
-
-Denied is the expected business result, so the evaluation passes when Denied appears. Acceptance of the click describes the click operation; the assertion checks the business response.
-
-## Why a capture can remain pending
-
-The latest capture briefly stays in memory until the next action is known. That action can then be attached as a candidate to the same observation. A result observation can also be the next action's source, forming a state-action-state trace.
-
-This pending capture is unrelated to an evaluation whose status is pending. Automatically recorded assertions report their final outcomes.
-
-Repeated assertions can produce separate observations without action links between them. The adapter preserves those visits rather than inventing actions. `observe()` requests another captured visit when using the explicit API.
-
-## When an integration needs more information
-
-The facade sees supported Playwright operations and assertions. An exploratory tool may also know which action candidates it discovered, why it selected one, or which custom oracle callback it ran. The tool supplies those details through explicit integration.
-
-Use the adapter's `ActionCandidate` to describe a discovered candidate, including its locator and planning parameters. `record_candidates(...)` saves the reported list at an observation. Passing `candidate=` to `perform` or `select_action` connects the selected execution to that candidate.
-
-For a facade page, use `evidence_for(page)` to access its existing recorder. The following custom test oracle is added to the same automatic trace:
-
-```python
-from testar_evidence import CheckReading, CheckRule
+from testar_evidence import ObservedValue, Oracle, OracleSeverity
+from testar_evidence_playwright import AvailableAction
 from testar_evidence_playwright.sync_api import evidence_for
 
-status = page.locator("#loanStatus")
+recorder = evidence_for(page)
+action = AvailableAction("click", "Apply for loan", page.locator("#apply"))
+recorder.record_available_actions([action], scope="eligible")
+recorder.perform(action.action_type, action.name, action.locator, {}, action.locator.click,
+                 available_action=action)
+recorder.capture()
 
-
-def assert_denied():
-    assert status.inner_text() == "Denied"
-
-
-evidence_for(page).checks.evaluate(
-    "The loan request is denied",
-    rule=CheckRule("example:loan-denied"),
-    locator=status,
-    property="playwright.dom.innerText",
-    expected="Denied",
-    assertion=assert_denied,
-    reading=lambda: CheckReading.value(status.inner_text()),
-)
+# The caller already ran this oracle and supplies its actual outcome and value.
+recorder.checks.record_result(Oracle("example:loan-status"), "Loan was denied", "passed",
+    locator=page.locator("#loanStatus"), property="playwright.dom.textContent",
+    expected_value="Denied", observed_value=ObservedValue.value("Denied"),
+    oracle_severity=OracleSeverity("informational"))
 ```
 
-`checks.record_result(...)` reports a check already run by the caller, without rerunning its callback. That result targets the captured observation and has an unknown actual reading. `perform(...)` wraps a custom operation on the same recorder.
+The caller supplies the list it discovered and the results it obtained. Planning parameters describe available actions; actual supplied input belongs to an execution. Passing `available_action=` connects selection to a reported choice. Several native operations inside one `perform` callback form one compound action, with nested facade records suppressed.
 
-An integration using native Playwright without the facade starts its own recorder with `PlaywrightEvidence.start_trace(...)`. It reports `capture()`, `select_action(...)`, and `submit_action(...)` around existing execution calls. The optional [explicit-recording example](../examples/parabank_denied_loan.py) demonstrates this approach.
+`checks.evaluate` runs a custom oracle callback once and obtains its observed value afterward. `checks.record_result` records an existing outcome without running the oracle again. Custom callers choose their targets, values, details, and optional severity. A supplied severity label keeps its source meaning; omission does not create a default.
 
-`checks.evaluate(...)` runs the supplied assertion once; that assertion owns its retry behavior. It records a rule, locator or state property, expectation, and actual reading. `perform(...)` treats a callback containing a whole routine as one outer action. Browser interactions executed inside a callback while another action is being recorded belong to that outer action. Use explicit integration when the evidence needs finer boundaries.
+Without the facade, start a recorder and call `capture`, `select_action`, `report_action_result`, and `capture` around existing native execution. The outcome is `returned` or `error`; its business correctness is evaluated by a separate oracle.
 
-Soft assertions use their assertion framework's result collection and require explicit integration. API response assertions also delegate to native Playwright and require an appropriate explicit result target.
+## Following one action and oracle
 
-## Understanding the captured data
+For Apply Now followed by checking Denied:
 
-The capture description tells consumers what area, widgets, and properties were collected and which known limitations apply. Source properties retain their concrete names and values. Shared aliases such as `ui.url`, `ui.title`, and `ui.text` identify declared equal readings within the same record.
+1. The recorder captures the source observation or uses the latest buffered capture.
+2. It identifies the selected available action and its widget when the locator can be matched.
+3. Playwright executes the click once. The recorder saves `returned` or `error` as its action execution result.
+4. A later capture supplies the resulting observation and creates the recorded transition.
+5. Playwright evaluates the text assertion with its normal retries. The adapter records one final oracle result, its observed value, and its precise target when identifiable.
+6. The next action or trace ending flushes buffered records. The sequence finishes before the run.
 
-Captured password values are redacted. Supported password-input operations and password-value assertions also omit secret values from their recorded metadata. Custom callbacks supply their own recorded parameters, expectations, and readings. Screenshots and other application data follow the chosen capture settings.
+Denied passes this oracle because denial is its expected business response. A returned click and a passed oracle describe different facts.
 
-Capture reads, screenshots, locator resolution, and assertion readings are successive browser operations. The application can change between them. The script controls application readiness and decides when another observation is useful.
+The latest observation can stay buffered so the next action can be included in its available-action list. That capture can then be both the previous action's result and the next action's source. Consecutive oracle evaluations can produce observations with no action between them. The recorder preserves those observations without inventing a transition.
 
-A widget's structural path identifies its place within one capture. Comparing different visits or tools requires explicit matching rules in consumers. The shared traces retain the original evidence for those decisions.
+## Captures and trace files
 
-See [SPEC](SPEC.md) for recording rules and [the README](../README.md) for installation and commands.
+Each used page has an independent trace containing one run and one sequence. The facade reserves a fresh timestamped child directory using the SUT and optional test objective labels. Optional origin and test objective descriptions retain their original text in run properties; adapter identity and version are supplied automatically.
+
+DOM extraction, locator resolution, screenshots, and oracle readings are separate browser operations. The script controls application readiness. Captures retain the document, elements, open shadow roots, selected properties, and known limits. State-level `ui.url` and `ui.title` identify the captured address and document title. Widget attributes and live values retain their concrete source meanings.
+
+A missing captured property does not establish application-level absence. Capturing a property does not establish that an oracle evaluated it. Structural widget paths identify elements within an observation; consumers use abstraction rules to match observations and build abstract models.
+
+The evidence library validates the generic records and writes `manifest.json`, `evidence.jsonl`, and referenced screenshot artifacts. A consumer supporting schema 3 loads the complete directory. Closing the page, browser, or facade finishes the recorder; an already closed page is finished from cached captures.
+
+See [SPEC](SPEC.md) for recording rules and [README](../README.md) for commands.

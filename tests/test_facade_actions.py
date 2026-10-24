@@ -83,7 +83,7 @@ class FacadeActionTests(unittest.TestCase):
     def test_navigation_keeps_supplied_url_and_options_without_running_native_code(self):
         metadata = describe_action(self.page, self.page, "goto", self.page.goto,
             ("https://example.test/",), {"wait_until": "domcontentloaded"})
-        self.assertEqual("navigate", metadata["kind"])
+        self.assertEqual("navigate", metadata["action_type"])
         self.assertEqual("Page.goto", metadata["name"])
         self.assertIsNone(metadata["locator"])
         self.assertEqual({"url": "https://example.test/", "wait_until": "domcontentloaded",
@@ -93,7 +93,7 @@ class FacadeActionTests(unittest.TestCase):
         locator = _Locator("#username")
         metadata = describe_action(locator, self.page, "fill", locator.fill, ("john",), {"timeout": 500})
         self.assertIs(locator, metadata["locator"])
-        self.assertEqual("fill", metadata["kind"])
+        self.assertEqual("fill", metadata["action_type"])
         self.assertEqual({"value": "john", "timeout": 500, "playwright.method": "Locator.fill"},
             metadata["parameters"])
 

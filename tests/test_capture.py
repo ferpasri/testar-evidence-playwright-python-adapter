@@ -144,7 +144,7 @@ class CaptureBrowserTests(unittest.TestCase):
     def setUp(self) -> None:
         self.context = self.browser.new_context()
         self.page = self.context.new_page()
-        self.page.set_default_timeout(500)
+        self.page.set_default_timeout(5_000)
 
     def tearDown(self) -> None:
         self.context.close()

@@ -6,7 +6,7 @@ A Python library that runs synchronous Playwright operations and records their e
 Python script -> Playwright Python adapter -> testar-evidence-python -> portable evidence
 ```
 
-The facade delegates browser operations to Playwright and records supported actions and Playwright assertions automatically. Explicit recording methods support integrations that need more control. Package version `0.2.3` follows the shared `0.2` release series.
+The facade delegates browser operations to Playwright and records supported actions and Playwright assertions automatically. Explicit recording methods support integrations that need more control. Package version `0.3.0` imports `testar-evidence>=0.3.0,<0.4` and records schema-3 traces.
 
 ## Install
 
@@ -43,7 +43,7 @@ with sync_playwright(
 
 The adapter retains native Playwright `Page` and `Locator` objects, arguments, return values, and exceptions. It records supported navigation, input, click, keyboard, and mouse operations. Read-only calls such as `locator.count()` remain readings. The adapter's `expect` records the final outcome of page and locator assertions while Playwright handles their retries.
 
-Each page gets its own timestamped trace below `evidence_path`. The SUT and test objective labels form part of its directory name. Closing the page, browser, or Playwright session finishes its trace. A directory contains `manifest.json`, `evidence.jsonl`, and screenshots in `artifacts/` when enabled. Load it in the dashboard.
+Each page gets its own timestamped trace below `evidence_path`. The SUT and test objective labels form part of its directory name. Closing the page, browser, or Playwright session finishes its trace. A directory contains `manifest.json`, `evidence.jsonl`, and screenshots in `artifacts/` when enabled. A schema-3 consumer loads the complete directory.
 
 Captured password values and supported password-input arguments are redacted. The caller remains responsible for other sensitive application data collected by DOM capture, screenshots, or custom recording callbacks.
 
@@ -57,7 +57,7 @@ For a facade page, `evidence_for(page)` returns its existing `PlaywrightEvidence
 
 `evidence_for(page).checks.evaluate(...)` wraps an ordinary Python assertion or custom oracle callback. `checks.record_result(...)` reports an outcome already obtained by the caller, and `perform(...)` wraps a custom operation. See [How it works](docs/how-it-works.md) for an example.
 
-An integration using native Playwright without the facade can create its own recorder with `PlaywrightEvidence.start_trace(...)`. It reports `capture()`, `select_action(...)`, and `submit_action(...)` around its execution calls. The caller supplies extra information such as discovered action candidates or reasons for action selection.
+An integration using native Playwright without the facade can create its own recorder with `PlaywrightEvidence.start_trace(...)`. It reports `capture()`, `select_action(...)`, and `report_action_result(...)` around its execution calls. The caller supplies extra information such as reported available actions or reasons for action selection.
 
 The facade supports synchronous Playwright. Soft assertions and API response assertions keep their native behavior; recording their results requires explicit integration.
 
@@ -93,20 +93,20 @@ In Bash, use `TESTAR_BROWSER_TESTS=1 PLAYWRIGHT_CHANNEL=chrome python -m unittes
 
 See [How it works](docs/how-it-works.md) for the components and integration flow, [SPEC](docs/SPEC.md) for recording behavior, and [TODO](TODO.md) for planned work.
 
-## Report discovered action candidates
+## Report available actions
 
-An exploratory caller can report the action candidates it discovered with `ActionCandidate` and `record_candidates`. Planning parameters identify action candidates; actual supplied input belongs to the selected execution.
+An exploratory caller can report its choices with `AvailableAction` and `record_available_actions`. Planning parameters describe the choice; generated input belongs to its execution.
 
 ```python
-from testar_evidence_playwright import ActionCandidate
+from testar_evidence_playwright import AvailableAction
 from testar_evidence_playwright.sync_api import evidence_for
 
-candidate = ActionCandidate("click", "Choose account", page.locator("#account"))
+action = AvailableAction("click", "Choose account", page.locator("#account"))
 recorder = evidence_for(page)
-recorder.record_candidates([candidate], scope="eligible")
-recorder.perform(candidate.kind, candidate.name, candidate.locator, {}, candidate.locator.click,
-                 candidate=candidate)
+recorder.record_available_actions([action], scope="eligible")
+recorder.perform(action.action_type, action.name, action.locator, {}, action.locator.click,
+                 available_action=action)
 recorder.capture()
 ```
 
-Use `generated` for a generated list, `eligible` for action candidates available to the caller's selection process, or `unknown` when its origin is unspecified. These scopes describe the reported list, not every interaction possible in the application. See [SPEC](docs/SPEC.md#reported-action-candidates).
+Use `generated` for a generated list, `eligible` for the list offered to the caller's selector, or `unknown` for unspecified scope. Unexecuted choices remain recorded. See [SPEC](docs/SPEC.md#available-actions-and-compound-actions).

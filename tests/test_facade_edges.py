@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from testar_evidence import CheckReading, CheckRule, EvidenceReader
+from testar_evidence import ObservedValue, Oracle, EvidenceReader
 from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence, evidence_for, expect, sync_playwright
 
 
@@ -38,7 +38,7 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
     def document(self, content):
         self.page.evaluate("html => { document.body.innerHTML = html; }", content)
 
-    def models(self):
+    def traces(self):
         return [EvidenceReader.read(path.parent)
             for path in sorted(self.directory.glob("*/manifest.json"))]
 
@@ -56,12 +56,12 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         password.clear()
         self.page.close()
 
-        self.assertEqual(4, len(self.models()[0].executions))
+        self.assertEqual(4, len(self.traces()[0].action_executions))
         self.assertNotIn("locator-password-secret", self.jsonl())
         self.assertNotIn("keyboard-password-secret", self.jsonl())
-        executions = list(self.models()[0].executions.values())
-        self.assertNotIn("key", executions[2]["execution"]["parameters"])
-        self.assertIn("key", executions[2]["execution"]["parameters"]["playwright.redacted_parameters"])
+        executions = list(self.traces()[0].action_executions.values())
+        self.assertNotIn("key", executions[2]["action_execution"]["parameters"])
+        self.assertIn("key", executions[2]["action_execution"]["parameters"]["playwright.redacted_parameters"])
 
     def test_password_assertions_keep_the_original_failure_but_omit_its_saved_values(self):
         self.document("<input id='password' type='password'>")
@@ -73,9 +73,9 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         self.assertIn("expected-password-secret", str(raised.exception))
         self.page.close()
 
-        checks = self.models()[0].checks
-        self.assertEqual(["passed", "failed"], [check["status"] for check in checks])
-        self.assertTrue(all(check["actual"] == {"kind": "unknown"} for check in checks))
+        checks = self.traces()[0].oracle_results
+        self.assertEqual(["passed", "failed"], [check["oracle_status"] for check in checks])
+        self.assertTrue(all(check["observed_value"] == {"value_status": "unknown"} for check in checks))
         self.assertNotIn("actual-password-secret", self.jsonl())
         self.assertNotIn("expected-password-secret", self.jsonl())
 
@@ -85,8 +85,8 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
             self.page.locator("#password").fill("invalid-call-secret", invalid_option=True)
         self.page.close()
 
-        execution = next(iter(self.models()[0].executions.values()))
-        self.assertEqual("rejected", execution["status"])
+        execution = next(iter(self.traces()[0].action_executions.values()))
+        self.assertEqual("failed", execution["status"])
         self.assertNotIn("invalid-call-secret", self.jsonl())
 
     def test_zero_argument_callback_and_listener_removal_keep_native_behavior(self):
@@ -102,16 +102,16 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         self.page.close()
 
         self.assertEqual(["called"], calls)
-        self.assertEqual(2, len(self.models()[0].executions))
+        self.assertEqual(2, len(self.traces()[0].action_executions))
 
     def test_native_page_close_event_finishes_the_cached_trace_without_new_capture(self):
         self.document("<input id='name'>")
         self.page.locator("#name").fill("Saved final value")
         object.__getattribute__(self.page, "close")()
 
-        model = self.models()[0]
-        self.assertEqual(1, len(model.links()))
-        self.assertTrue(all(run["status"] == "finished" for run in model.runs.values()))
+        evidence = self.traces()[0]
+        self.assertEqual(1, len(evidence.recorded_transitions))
+        self.assertTrue(all(run["status"] == "finished" for run in evidence.test_runs.values()))
         self.assertIn("Saved final value", self.jsonl())
 
     def test_action_in_a_callback_during_a_wait_is_recorded(self):
@@ -126,7 +126,7 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         self.assertEqual("Callback value", self.page.locator("#name").input_value())
         self.page.close()
 
-        self.assertEqual(1, len(self.models()[0].executions))
+        self.assertEqual(1, len(self.traces()[0].action_executions))
 
     def test_failed_evidence_writer_does_not_prevent_native_page_cleanup(self):
         self.document("<input id='name'>")
@@ -148,21 +148,21 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         self.assertIs(evidence, sync_evidence_for(self.page))
         evidence.perform("custom_input", "Set the input through a custom operation", name,
             {"value": "Custom value"}, lambda: name.fill("Custom value"))
-        evidence.checks.evaluate("Custom input check", rule=CheckRule("example:input-value"),
-            locator=name, property="playwright.dom.value", expected="Custom value",
+        evidence.checks.evaluate("Custom input check", oracle=Oracle("example:input-value"),
+            locator=name, property="playwright.dom.value", expected_value="Custom value",
             assertion=lambda: expect(name).to_have_value("Custom value"),
-            reading=lambda: CheckReading.value(name.input_value()))
+            observed_value=lambda: ObservedValue.value(name.input_value()))
         self.page.close()
 
         with self.assertRaisesRegex(RuntimeError, "finished"):
             evidence_for(self.page)
-        models = self.models()
-        self.assertEqual(1, len(models))
-        self.assertEqual(2, len(models[0].executions))
-        self.assertEqual(2, len(models[0].links()))
-        self.assertEqual(1, len(models[0].checks))
-        self.assertEqual("passed", models[0].checks[0]["status"])
-        self.assertEqual({"kind": "value", "value": "Custom value"}, models[0].checks[0]["actual"])
+        traces = self.traces()
+        self.assertEqual(1, len(traces))
+        self.assertEqual(2, len(traces[0].action_executions))
+        self.assertEqual(2, len(traces[0].recorded_transitions))
+        self.assertEqual(1, len(traces[0].oracle_results))
+        self.assertEqual("passed", traces[0].oracle_results[0]["oracle_status"])
+        self.assertEqual({"value_status": "value", "value": "Custom value"}, traces[0].oracle_results[0]["observed_value"])
 
     def test_explicit_recording_does_not_repeat_the_wrapped_browser_operation(self):
         self.document("<button onclick='window.count += 1'>Count</button>")
@@ -176,9 +176,9 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
         self.page.close()
 
         manual = EvidenceReader.read(manual_directory)
-        self.assertEqual(1, len(manual.executions))
-        self.assertEqual(1, len(manual.checks))
-        self.assertTrue(all(len(model.executions) == 0 and model.checks == [] for model in self.models()))
+        self.assertEqual(1, len(manual.action_executions))
+        self.assertEqual(1, len(manual.oracle_results))
+        self.assertTrue(all(len(evidence.action_executions) == 0 and evidence.oracle_results == [] for evidence in self.traces()))
 
 
 if __name__ == "__main__":

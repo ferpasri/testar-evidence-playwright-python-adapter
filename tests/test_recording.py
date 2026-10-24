@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from testar_evidence import CheckReading, CheckRule, EvidenceError, EvidenceReader, Widget
+from testar_evidence import ObservedValue, Oracle, EvidenceError, EvidenceReader, Widget
 from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence
 from testar_evidence_playwright.capture import BrowserSnapshot
 
@@ -32,20 +32,20 @@ class RecordingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already running"):
                 evidence.perform("macro", "Outer action", None, {}, lambda:
                     evidence.perform("click", "Nested action", None, {}, lambda: calls.append("inner")))
-        model = EvidenceReader.read(self.output)
+        evidence = EvidenceReader.read(self.output)
         self.assertEqual([], calls)
-        self.assertEqual(1, len(model.executions))
-        self.assertEqual("rejected", next(iter(model.executions.values()))["status"])
-        self.assertEqual([], model.links())
+        self.assertEqual(1, len(evidence.action_executions))
+        self.assertEqual("failed", next(iter(evidence.action_executions.values()))["status"])
+        self.assertEqual([], evidence.recorded_transitions)
 
     def test_invalid_check_data_is_rejected_before_running_the_test_oracle(self):
         calls = []
         with self.start() as evidence:
             with self.assertRaises(EvidenceError):
-                evidence.checks.evaluate("Check", rule=CheckRule(""), assertion=lambda: calls.append("assertion"),
-                    reading=lambda: CheckReading.value("value"))
+                evidence.checks.evaluate("Check", oracle=Oracle(""), assertion=lambda: calls.append("assertion"),
+                    observed_value=lambda: ObservedValue.value("value"))
         self.assertEqual([], calls)
-        self.assertEqual([], EvidenceReader.read(self.output).checks)
+        self.assertEqual([], EvidenceReader.read(self.output).oracle_results)
 
     def test_interrupted_action_keeps_the_original_exception_and_rejection(self):
         failure = KeyboardInterrupt("Stop")
@@ -57,9 +57,9 @@ class RecordingTests(unittest.TestCase):
             with self.start() as evidence:
                 evidence.perform("custom", "Interrupted action", None, {}, operation)
         self.assertIs(failure, caught.exception)
-        model = EvidenceReader.read(self.output)
-        self.assertEqual("rejected", next(iter(model.executions.values()))["status"])
-        self.assertEqual("action_failed", next(iter(model.runs.values()))["reason"])
+        evidence = EvidenceReader.read(self.output)
+        self.assertEqual("failed", next(iter(evidence.action_executions.values()))["status"])
+        self.assertEqual("action_failed", next(iter(evidence.test_runs.values()))["reason"])
 
     def test_persistence_failure_keeps_saved_prefix_and_releases_the_writer(self):
         evidence = self.start()
@@ -72,10 +72,10 @@ class RecordingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "writer failed"):
             evidence.observe()
         evidence.close()
-        model = EvidenceReader.read(self.output)
-        self.assertEqual(1, len(model.observations))
-        self.assertEqual("running", next(iter(model.runs.values()))["status"])
-        self.assertEqual({}, model.executions)
+        evidence = EvidenceReader.read(self.output)
+        self.assertEqual(1, len(evidence.observations))
+        self.assertEqual("running", next(iter(evidence.test_runs.values()))["status"])
+        self.assertEqual({}, evidence.action_executions)
 
     def test_cleanup_failure_does_not_replace_a_failed_assertion(self):
         failure = AssertionError("Expected confirmation")
@@ -87,15 +87,15 @@ class RecordingTests(unittest.TestCase):
         original = evidence._store.record
 
         def record(event):
-            if event.kind == "checked":
+            if event.event_type == "oracle_result_recorded":
                 raise OSError("Disk unavailable")
             return original(event)
 
         with patch.object(evidence._store, "record", side_effect=record):
             with self.assertRaises(AssertionError) as caught:
                 with evidence:
-                    evidence.checks.evaluate("Confirmation", rule=CheckRule("fixture:confirmation"),
-                        assertion=assertion, reading=lambda: CheckReading.value("Wrong"))
+                    evidence.checks.evaluate("Confirmation", oracle=Oracle("fixture:confirmation"),
+                        assertion=assertion, observed_value=lambda: ObservedValue.value("Wrong"))
         self.assertIs(failure, caught.exception)
         self.assertTrue(any("Evidence" in note for note in caught.exception.__notes__))
         self.assertEqual(1, len(EvidenceReader.read(self.output).observations))
@@ -142,14 +142,14 @@ class RecordingTests(unittest.TestCase):
             raise failure
 
         with self.start() as evidence:
-            with patch.object(evidence, "_record_check", side_effect=recording_failure):
+            with patch.object(evidence, "_record_oracle_result", side_effect=recording_failure):
                 with self.assertRaises(AssertionError) as caught:
-                    evidence.checks.evaluate("Condition", rule=CheckRule("fixture:condition"),
-                        assertion=assertion, reading=CheckReading.unknown)
+                    evidence.checks.evaluate("Condition", oracle=Oracle("fixture:condition"),
+                        assertion=assertion, observed_value=ObservedValue.unknown)
             self.assertIs(failure, caught.exception)
             self.assertIs(recording_failure, evidence.checks.recording_error)
-            evidence.checks.evaluate("Another condition", rule=CheckRule("fixture:other"),
-                assertion=lambda: None, reading=CheckReading.unknown)
+            evidence.checks.evaluate("Another condition", oracle=Oracle("fixture:other"),
+                assertion=lambda: None, observed_value=ObservedValue.unknown)
             self.assertIsNone(evidence.checks.recording_error)
 
 

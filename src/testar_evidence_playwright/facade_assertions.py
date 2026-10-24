@@ -10,7 +10,7 @@ import re
 from typing import Any, Callable
 
 from playwright.sync_api import Locator, Page, expect as native_expect
-from testar_evidence import CheckReading, CheckRule, UNSPECIFIED
+from testar_evidence import ObservedValue, Oracle, UNSPECIFIED
 
 
 class EvidenceExpect:
@@ -64,9 +64,9 @@ class _Assertions:
                     result = member(*arguments, **options)
 
                 recorder.checks.evaluate(self._message or "Playwright " + name,
-                    rule=metadata.rule, locator=metadata.locator,
-                    property=metadata.property, expected=metadata.expected,
-                    assertion=operation, reading=metadata.reading, redact_error=metadata.redacted)
+                    oracle=metadata.oracle, locator=metadata.locator,
+                    property=metadata.property, expected_value=metadata.expected,
+                    assertion=operation, observed_value=metadata.reading, redact_error=metadata.redacted)
                 return result
 
         return assertion
@@ -84,12 +84,12 @@ class _AssertionDetails:
         self.property = None
         self.expected = UNSPECIFIED
         self.redacted = False
-        self.reading: Callable[[], CheckReading] = CheckReading.unknown
+        self.reading: Callable[[], ObservedValue] = ObservedValue.unknown
         parameters = {"comparison": method, "negated": method.startswith("not_")}
         parameters["arguments"] = _json_value(arguments)
         self._select_reading(parameters)
         self._redact_password_value(parameters)
-        self.rule = CheckRule("playwright:" + method, "1", parameters)
+        self.oracle = Oracle("playwright:" + method, "1", parameters)
 
     def _redact_password_value(self, parameters):
         if not isinstance(self.subject, Locator):
@@ -105,7 +105,7 @@ class _AssertionDetails:
             secret = True
         if secret:
             self.expected = UNSPECIFIED
-            self.reading = CheckReading.unknown
+            self.reading = ObservedValue.unknown
             self.redacted = True
             parameters["arguments"] = {"redacted": True}
             parameters["redaction"] = "Password or unresolved value target; expected and actual values are omitted."
@@ -118,7 +118,7 @@ class _AssertionDetails:
         if self.method == "to_have_count":
             self.locator = None
             self.expected = _json_value(self.arguments["count"])
-            self.reading = lambda: CheckReading.value(self.subject.count())
+            self.reading = lambda: ObservedValue.value(self.subject.count())
             parameters["target_scope"] = "locator_collection"
             return
         if self.method in {"to_have_text", "to_contain_text", "to_have_class", "to_contain_class"}:
@@ -130,9 +130,9 @@ class _AssertionDetails:
                 if self.method in {"to_have_text", "to_contain_text"}:
                     method = self.subject.all_inner_texts if self.arguments.get("use_inner_text") \
                         else self.subject.all_text_contents
-                    self.reading = lambda: CheckReading.value(method())
+                    self.reading = lambda: ObservedValue.value(method())
                 else:
-                    self.reading = lambda: CheckReading.value(self.subject.evaluate_all(
+                    self.reading = lambda: ObservedValue.value(self.subject.evaluate_all(
                         "elements => elements.map(element => element.getAttribute('class'))"))
                 return
         self._locator_reading(parameters)
@@ -141,11 +141,11 @@ class _AssertionDetails:
         if self.method == "to_have_title":
             self.property = "ui.title"
             self.expected = _json_value(self.arguments["title_or_reg_exp"])
-            self.reading = lambda: CheckReading.value(self.subject.title())
+            self.reading = lambda: ObservedValue.value(self.subject.title())
         elif self.method == "to_have_url":
             self.property = "ui.url"
             self.expected = _json_value(self.arguments["url_or_reg_exp"])
-            self.reading = lambda: CheckReading.value(self.subject.url)
+            self.reading = lambda: ObservedValue.value(self.subject.url)
         else:
             self._unmapped(parameters)
 
@@ -200,9 +200,9 @@ class _AssertionDetails:
 
         def reading():
             if self.subject.count() != 1:
-                return CheckReading.unknown()
+                return ObservedValue.unknown()
             value = self.subject.get_attribute(name, timeout=100)
-            return CheckReading.absent() if value is None else CheckReading.value(value)
+            return ObservedValue.absent() if value is None else ObservedValue.value(value)
 
         self.reading = reading
 
@@ -222,7 +222,7 @@ class _AssertionDetails:
             self.reading = lambda: self._element_reading(lambda: getattr(self.subject, "is_" + name)(timeout=100))
         elif name == "attached":
             self.property = "playwright.dom.isConnected"
-            self.reading = lambda: CheckReading.value(False) if self.subject.count() == 0 \
+            self.reading = lambda: ObservedValue.value(False) if self.subject.count() == 0 \
                 else self._element_reading(lambda: self.subject.evaluate("element => element.isConnected", timeout=100))
         else:
             self.property = "playwright.focused"
@@ -231,8 +231,8 @@ class _AssertionDetails:
 
     def _element_reading(self, supplier):
         if self.subject.count() != 1:
-            return CheckReading.unknown()
-        return CheckReading.value(supplier())
+            return ObservedValue.unknown()
+        return ObservedValue.value(supplier())
 
     def _unmapped(self, parameters):
         parameters["actual_reading"] = "The assertion outcome is recorded; no property reading is mapped."

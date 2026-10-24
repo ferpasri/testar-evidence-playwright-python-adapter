@@ -20,12 +20,12 @@ class RecordingChecks:
         try:
             arguments["assertion"]()
         except BaseException:
-            result["status"] = "failed"
-            result["actual"] = arguments["reading"]().to_dict()
+            result["oracle_status"] = "failed"
+            result["observed_value"] = arguments["observed_value"]().to_dict()
             self.results.append(result)
             raise
-        result["status"] = "passed"
-        result["actual"] = arguments["reading"]().to_dict()
+        result["oracle_status"] = "passed"
+        result["observed_value"] = arguments["observed_value"]().to_dict()
         self.results.append(result)
 
 
@@ -82,8 +82,8 @@ class FacadeAssertionsTests(unittest.TestCase):
         recorded = self.checks.results[0]
         self.assertEqual("Ready text", recorded["name"])
         self.assertEqual("playwright.dom.textContent", recorded["property"])
-        self.assertEqual({"kind": "value", "value": "Ready"}, recorded["actual"])
-        self.assertEqual("regular_expression", recorded["expected"]["kind"])
+        self.assertEqual({"value_status": "value", "value": "Ready"}, recorded["observed_value"])
+        self.assertEqual("regular_expression", recorded["expected_value"]["kind"])
         self.assertEqual(0, self.runtime.suspension_depth)
 
     def test_negated_failure_keeps_original_exception_and_records_once(self):
@@ -99,8 +99,8 @@ class FacadeAssertionsTests(unittest.TestCase):
         self.assertIs(original, raised.exception)
         self.assertEqual(1, len(self.checks.results))
         recorded = self.checks.results[0]
-        self.assertEqual("failed", recorded["status"])
-        self.assertTrue(recorded["rule"].parameters["negated"])
+        self.assertEqual("failed", recorded["oracle_status"])
+        self.assertTrue(recorded["oracle"].parameters["negated"])
         self.assertEqual(0, self.runtime.suspension_depth)
 
     def test_collection_text_targets_observation_and_retains_list_expectation(self):
@@ -111,8 +111,8 @@ class FacadeAssertionsTests(unittest.TestCase):
         recorded = self.checks.results[0]
         self.assertIsNone(recorded["locator"])
         self.assertIsNone(recorded["property"])
-        self.assertEqual({"kind": "value", "value": ["First", "Second"]}, recorded["actual"])
-        self.assertEqual("regular_expression", recorded["expected"][1]["kind"])
+        self.assertEqual({"value_status": "value", "value": ["First", "Second"]}, recorded["observed_value"])
+        self.assertEqual("regular_expression", recorded["expected_value"][1]["kind"])
 
     def test_page_title_and_url_are_state_properties(self):
         page = Mock(spec=Page)
@@ -126,7 +126,7 @@ class FacadeAssertionsTests(unittest.TestCase):
         expect(page).to_have_url(re.compile("/loan$"))
 
         self.assertEqual(["ui.title", "ui.url"], [item["property"] for item in self.checks.results])
-        self.assertEqual({"kind": "value", "value": page.url}, self.checks.results[-1]["actual"])
+        self.assertEqual({"value_status": "value", "value": page.url}, self.checks.results[-1]["observed_value"])
 
     def test_attribute_presence_retains_absence_and_omits_value_expectation(self):
         self.native.to_have_attribute = lambda name, value=None: None
@@ -135,8 +135,8 @@ class FacadeAssertionsTests(unittest.TestCase):
 
         recorded = self.checks.results[0]
         self.assertEqual("playwright.attribute.alt", recorded["property"])
-        self.assertIs(UNSPECIFIED, recorded["expected"])
-        self.assertEqual({"kind": "absent"}, recorded["actual"])
+        self.assertIs(UNSPECIFIED, recorded["expected_value"])
+        self.assertEqual({"value_status": "absent"}, recorded["observed_value"])
 
     def test_count_is_collection_evidence_without_arbitrary_widget_target(self):
         self.native.to_have_count = lambda count: None
@@ -146,7 +146,7 @@ class FacadeAssertionsTests(unittest.TestCase):
         recorded = self.checks.results[0]
         self.assertIsNone(recorded["locator"])
         self.assertIsNone(recorded["property"])
-        self.assertEqual({"kind": "value", "value": 3}, recorded["actual"])
+        self.assertEqual({"value_status": "value", "value": 3}, recorded["observed_value"])
 
     def test_invalid_call_arguments_raise_before_any_result_is_recorded(self):
         self.native.to_have_text = lambda expected: None
@@ -160,8 +160,8 @@ class FacadeAssertionsTests(unittest.TestCase):
 
         recorded = self.checks.results[0]
         self.assertIsNone(recorded["property"])
-        self.assertEqual({"kind": "unknown"}, recorded["actual"])
-        self.assertEqual("Continue", recorded["expected"])
+        self.assertEqual({"value_status": "unknown"}, recorded["observed_value"])
+        self.assertEqual("Continue", recorded["expected_value"])
 
     def test_plain_playwright_objects_and_soft_assertions_delegate_unchanged(self):
         plain_locator = Mock(spec=Locator)
@@ -183,10 +183,10 @@ class FacadeAssertionsTests(unittest.TestCase):
         expect(self.locator).to_have_value("private-password")
 
         recorded = self.checks.results[0]
-        self.assertIs(UNSPECIFIED, recorded["expected"])
-        self.assertEqual({"kind": "unknown"}, recorded["actual"])
+        self.assertIs(UNSPECIFIED, recorded["expected_value"])
+        self.assertEqual({"value_status": "unknown"}, recorded["observed_value"])
         self.assertTrue(recorded["redact_error"])
-        self.assertNotIn("private-password", str(recorded["rule"].to_dict()))
+        self.assertNotIn("private-password", str(recorded["oracle"].to_dict()))
 
     def test_explicit_recording_suspension_uses_native_expect_without_duplicate_results(self):
         with self.runtime.suspended():

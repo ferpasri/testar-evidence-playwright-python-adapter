@@ -24,8 +24,8 @@ class RunMetadataTests(unittest.TestCase):
         self.addCleanup(capture.stop)
 
     def properties(self, directory=None):
-        model = EvidenceReader.read(directory or self.output)
-        return next(iter(model.runs.values()))["run"]["properties"]
+        evidence = EvidenceReader.read(directory or self.output)
+        return next(iter(evidence.test_runs.values()))["test_run"]["properties"]
 
     def test_omitted_descriptions_stay_absent_with_automatic_adapter_identity(self):
         with PlaywrightEvidence.start(self.output, self.page):
@@ -47,7 +47,7 @@ class RunMetadataTests(unittest.TestCase):
                 properties = self.properties(directory)
                 self.assertEqual(origin, properties["evidence.origin"])
                 self.assertEqual("  Request loan — prêt  ", properties["evidence.test_objective"])
-                execution = next(iter(EvidenceReader.read(directory).executions.values()))["execution"]
+                execution = next(iter(EvidenceReader.read(directory).action_executions.values()))["action_execution"]
                 self.assertNotIn("playwright.origin", execution["parameters"])
                 self.assertNotIn("evidence.origin", execution["parameters"])
 

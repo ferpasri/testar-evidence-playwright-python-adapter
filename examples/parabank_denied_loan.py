@@ -26,10 +26,10 @@ def create_trace_directory(
     parent.mkdir(parents=True, exist_ok=True)
     suffix = 1
     while True:
-        candidate = parent / (name if suffix == 1 else f"{name}-{suffix}")
+        directory = parent / (name if suffix == 1 else f"{name}-{suffix}")
         try:
-            candidate.mkdir()
-            return candidate
+            directory.mkdir()
+            return directory
         except FileExistsError:
             suffix += 1
 

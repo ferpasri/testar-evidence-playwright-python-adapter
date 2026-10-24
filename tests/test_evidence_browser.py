@@ -12,7 +12,7 @@ import unittest
 from urllib.parse import parse_qs
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, sync_playwright
-from testar_evidence import CheckReading, CheckRule, EvidenceError, EvidenceReader
+from testar_evidence import ObservedValue, Oracle, EvidenceError, EvidenceReader
 from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence
 
 from examples.parabank_denied_loan import run
@@ -120,27 +120,27 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
                 evidence.finish("completed")
                 evidence.finish("completed")
 
-        model = self.read()
-        self.assertEqual(8, len(model.executions))
-        self.assertEqual(8, len(model.links()))
-        self.assertGreaterEqual(len(model.observations), 9)
-        self.assertEqual(3, len(model.checks))
-        self.assertEqual("completed", next(iter(model.runs.values()))["reason"])
-        for check in model.checks:
-            self.assertEqual("passed", check["status"])
-            self.assertEqual("widget_property", check["target"]["kind"])
-        self.assertEqual({"kind": "value", "value": "Denied"}, model.checks[-1]["actual"])
-        for observation in model.observations.values():
-            self.assertEqual("unknown", observation["candidate_scope"])
+        evidence = self.read()
+        self.assertEqual(8, len(evidence.action_executions))
+        self.assertEqual(8, len(evidence.recorded_transitions))
+        self.assertGreaterEqual(len(evidence.observations), 9)
+        self.assertEqual(3, len(evidence.oracle_results))
+        self.assertEqual("completed", next(iter(evidence.test_runs.values()))["reason"])
+        for check in evidence.oracle_results:
+            self.assertEqual("passed", check["oracle_status"])
+            self.assertEqual("widget_property", check["oracle_target"]["target_type"])
+        self.assertEqual({"value_status": "value", "value": "Denied"}, evidence.oracle_results[-1]["observed_value"])
+        for observation in evidence.observations.values():
+            self.assertEqual("unknown", observation["available_action_scope"])
             self.assertEqual(1, len(observation["artifacts"]))
             reference = observation["artifacts"][0]
             content = (self.directory / reference["path"]).read_bytes()
             self.assertTrue(content.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual(hashlib.sha256(content).hexdigest(), reference["sha256"])
-        for execution in model.executions.values():
-            self.assertEqual("observed", execution["status"])
-            self.assertIn(execution["execution"]["source"], model.observations)
-            self.assertIn(execution["result"], model.observations)
+        for execution in evidence.action_executions.values():
+            self.assertEqual("completed", execution["status"])
+            self.assertIn(execution["action_execution"]["source_observation"], evidence.observations)
+            self.assertIn(execution["resulting_observation"], evidence.observations)
 
     def test_failed_assertion_saves_actual_reading_and_run_reason(self):
         self.page.set_content("<p id='status'>Actual</p>")
@@ -149,11 +149,11 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 evidence.checks.has_text("example:text", "Expected text", self.page.locator("#status"), "Expected")
 
-        model = self.read()
-        self.assertEqual("failed", model.checks[0]["status"])
-        self.assertEqual({"kind": "value", "value": "Actual"}, model.checks[0]["actual"])
-        self.assertEqual("check_failed", next(iter(model.runs.values()))["reason"])
-        self.assertTrue(model.checks[0]["details"])
+        evidence = self.read()
+        self.assertEqual("failed", evidence.oracle_results[0]["oracle_status"])
+        self.assertEqual({"value_status": "value", "value": "Actual"}, evidence.oracle_results[0]["observed_value"])
+        self.assertEqual("check_failed", next(iter(evidence.test_runs.values()))["reason"])
+        self.assertTrue(evidence.oracle_results[0]["oracle_details"])
 
     def test_rejected_browser_action_has_no_result_or_fabricated_link(self):
         self.page.set_content("<p>Ready</p>")
@@ -161,13 +161,13 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             with self.assertRaises(PlaywrightTimeoutError):
                 evidence.click(self.page.locator("#missing"), timeout=100)
 
-        model = self.read()
-        execution = next(iter(model.executions.values()))
-        self.assertEqual("rejected", execution["status"])
-        self.assertIsNone(execution["result"])
-        self.assertIn("missing", execution["error"])
-        self.assertEqual([], model.links())
-        self.assertEqual("action_failed", next(iter(model.runs.values()))["reason"])
+        evidence = self.read()
+        execution = next(iter(evidence.action_executions.values()))
+        self.assertEqual("failed", execution["status"])
+        self.assertIsNone(execution["resulting_observation"])
+        self.assertIn("missing", execution["execution_result"]["error"])
+        self.assertEqual([], evidence.recorded_transitions)
+        self.assertEqual("action_failed", next(iter(evidence.test_runs.values()))["reason"])
 
     def test_custom_oracle_error_keeps_original_exception_and_unknown_reading(self):
         self.page.set_content("<p id='status'>Ready</p>")
@@ -181,32 +181,32 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
 
         with PlaywrightEvidence.start(self.directory, self.page) as evidence:
             with self.assertRaises(RuntimeError) as raised:
-                evidence.checks.evaluate("Custom oracle", rule=CheckRule("example:custom", "7"),
+                evidence.checks.evaluate("Custom oracle", oracle=Oracle("example:custom", "7"),
                                          locator=self.page.locator("#status"), property="custom.value",
-                                         expected=None, assertion=assert_condition, reading=read_actual)
+                                         expected_value=None, assertion=assert_condition, observed_value=read_actual)
             self.assertIs(original, raised.exception)
 
-        check = self.read().checks[0]
-        self.assertEqual("error", check["status"])
-        self.assertEqual({"kind": "unknown"}, check["actual"])
-        self.assertIn("expected", check)
-        self.assertIsNone(check["expected"])
-        self.assertEqual("7", check["rule"]["version"])
+        check = self.read().oracle_results[0]
+        self.assertEqual("error", check["oracle_status"])
+        self.assertEqual({"value_status": "unknown"}, check["observed_value"])
+        self.assertIn("expected_value", check)
+        self.assertIsNone(check["expected_value"])
+        self.assertEqual("7", check["oracle"]["version"])
 
     def test_unsupplied_expectation_is_distinct_from_explicit_null(self):
         self.page.set_content("<p id='status'>Ready</p>")
         with PlaywrightEvidence.start(self.directory, self.page) as evidence:
-            evidence.checks.evaluate("No expectation", rule=CheckRule("example:none"),
+            evidence.checks.evaluate("No expectation", oracle=Oracle("example:none"),
                                      locator=self.page.locator("#status"), property="custom.value",
-                                     assertion=lambda: None, reading=lambda: CheckReading.value(None))
-            evidence.checks.evaluate("Null expectation", rule=CheckRule("example:null"),
+                                     assertion=lambda: None, observed_value=lambda: ObservedValue.value(None))
+            evidence.checks.evaluate("Null expectation", oracle=Oracle("example:null"),
                                      locator=self.page.locator("#status"), property="custom.value",
-                                     expected=None, assertion=lambda: None, reading=lambda: CheckReading.value(None))
+                                     expected_value=None, assertion=lambda: None, observed_value=lambda: ObservedValue.value(None))
 
-        checks = self.read().checks
-        self.assertNotIn("expected", checks[0])
-        self.assertIsNone(checks[1]["expected"])
-        self.assertEqual({"kind": "value", "value": None}, checks[0]["actual"])
+        checks = self.read().oracle_results
+        self.assertNotIn("expected_value", checks[0])
+        self.assertIsNone(checks[1]["expected_value"])
+        self.assertEqual({"value_status": "value", "value": None}, checks[0]["observed_value"])
 
     def test_missing_attribute_is_an_absent_reading(self):
         self.page.set_content("<img id='help'>")
@@ -215,11 +215,11 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 evidence.checks.has_attribute("example:alt", "Image description", self.page.locator("#help"), "alt", "Help")
 
-        check = self.read().checks[0]
-        self.assertEqual("failed", check["status"])
-        self.assertEqual({"kind": "absent"}, check["actual"])
-        self.assertEqual("widget_property", check["target"]["kind"])
-        self.assertEqual("playwright.attribute.alt", check["target"]["property"])
+        check = self.read().oracle_results[0]
+        self.assertEqual("failed", check["oracle_status"])
+        self.assertEqual({"value_status": "absent"}, check["observed_value"])
+        self.assertEqual("widget_property", check["oracle_target"]["target_type"])
+        self.assertEqual("playwright.attribute.alt", check["oracle_target"]["property"])
 
     def test_value_check_reads_current_input_value(self):
         self.page.set_content("<input id='name' value='Original'>")
@@ -227,10 +227,10 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         with PlaywrightEvidence.start(self.directory, self.page) as evidence:
             evidence.checks.has_value("example:value", "Current input value", self.page.locator("#name"), "Current")
 
-        check = self.read().checks[0]
-        self.assertEqual("passed", check["status"])
-        self.assertEqual({"kind": "value", "value": "Current"}, check["actual"])
-        self.assertEqual("playwright.dom.value", check["target"]["property"])
+        check = self.read().oracle_results[0]
+        self.assertEqual("passed", check["oracle_status"])
+        self.assertEqual({"value_status": "value", "value": "Current"}, check["observed_value"])
+        self.assertEqual("playwright.dom.value", check["oracle_target"]["property"])
 
     def test_assertion_retries_save_one_final_evaluation(self):
         self.page.set_content("""
@@ -240,10 +240,10 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         with PlaywrightEvidence.start(self.directory, self.page) as evidence:
             evidence.checks.has_text("example:ready", "Ready", self.page.locator("#status"), "Ready")
 
-        checks = self.read().checks
+        checks = self.read().oracle_results
         self.assertEqual(1, len(checks))
-        self.assertEqual("passed", checks[0]["status"])
-        self.assertEqual({"kind": "value", "value": "Ready"}, checks[0]["actual"])
+        self.assertEqual("passed", checks[0]["oracle_status"])
+        self.assertEqual({"value_status": "value", "value": "Ready"}, checks[0]["observed_value"])
 
     def test_consecutive_checks_save_distinct_visits_without_actions(self):
         self.page.set_content("<p id='status' title='Tooltip'>Ready</p>")
@@ -251,11 +251,11 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             evidence.checks.has_text("example:text", "Text", self.page.locator("#status"), "Ready")
             evidence.checks.has_attribute("example:title", "Title", self.page.locator("#status"), "title", "Tooltip")
 
-        model = self.read()
-        self.assertEqual(2, len(model.checks))
-        self.assertNotEqual(model.checks[0]["target"]["observation"], model.checks[1]["target"]["observation"])
-        self.assertEqual({}, model.executions)
-        self.assertEqual([], model.links())
+        evidence = self.read()
+        self.assertEqual(2, len(evidence.oracle_results))
+        self.assertNotEqual(evidence.oracle_results[0]["oracle_target"]["observation"], evidence.oracle_results[1]["oracle_target"]["observation"])
+        self.assertEqual({}, evidence.action_executions)
+        self.assertEqual([], evidence.recorded_transitions)
 
     def test_custom_action_preserves_parameters_and_caller_operation(self):
         self.page.set_content("<button id='button' onclick=\"this.textContent='Done'\">Continue</button>")
@@ -264,14 +264,14 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             evidence.perform("custom", "Custom action", self.page.locator("#button"), parameters,
                              lambda: self.page.locator("#button").click())
 
-        model = self.read()
-        execution = next(iter(model.executions.values()))
-        self.assertEqual("observed", execution["status"])
+        evidence = self.read()
+        execution = next(iter(evidence.action_executions.values()))
+        self.assertEqual("completed", execution["status"])
         for key, value in parameters.items():
-            self.assertEqual(value, execution["execution"]["parameters"][key])
+            self.assertEqual(value, execution["action_execution"]["parameters"][key])
         self.assertEqual("Done", self.page.locator("#button").inner_text())
-        action = model.actions[execution["execution"]["action"]]
-        self.assertEqual("custom", action["kind"])
+        action = evidence.action_descriptions[execution["action_execution"]["action_description"]]
+        self.assertEqual("custom", action["action_type"])
 
     def test_secret_fill_omits_password_from_saved_values_and_parameters(self):
         self.page.set_content("<input id='password' type='password' value='initial-password-secret'>")
@@ -279,14 +279,14 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         with PlaywrightEvidence.start(self.directory, self.page) as evidence:
             evidence.fill_secret(self.page.locator("#password"), secret)
 
-        model = self.read()
+        evidence = self.read()
         self.assertEqual(secret, self.page.locator("#password").input_value())
         saved = (self.directory / "evidence.jsonl").read_text(encoding="utf-8")
         self.assertNotIn(secret, saved)
         self.assertNotIn("initial-password-secret", saved)
-        execution = next(iter(model.executions.values()))
-        self.assertEqual("observed", execution["status"])
-        self.assertNotIn("value", execution["execution"]["parameters"])
+        execution = next(iter(evidence.action_executions.values()))
+        self.assertEqual("completed", execution["status"])
+        self.assertNotIn("value", execution["action_execution"]["parameters"])
 
     def test_password_appearing_during_fill_wait_does_not_save_secret_parameter(self):
         self.page.set_content("""
@@ -303,7 +303,7 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             evidence.fill(self.page.locator("#password"), secret)
 
         self.assertEqual(secret, self.page.locator("#password").input_value())
-        parameters = next(iter(self.read().executions.values()))["execution"]["parameters"]
+        parameters = next(iter(self.read().action_executions.values()))["action_execution"]["parameters"]
         self.assertNotIn("value", parameters)
         self.assertIn("value", parameters["playwright.redacted_parameters"])
         self.assertNotIn(secret, (self.directory / "evidence.jsonl").read_text(encoding="utf-8"))
@@ -315,7 +315,7 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         with PlaywrightEvidence.start(self.directory, self.page, options) as evidence:
             evidence.fill(self.page.locator("#password"), secret)
 
-        parameters = next(iter(self.read().executions.values()))["execution"]["parameters"]
+        parameters = next(iter(self.read().action_executions.values()))["action_execution"]["parameters"]
         self.assertNotIn("value", parameters)
         self.assertIn("value", parameters["playwright.redacted_parameters"])
         self.assertNotIn(secret, (self.directory / "evidence.jsonl").read_text(encoding="utf-8"))
@@ -326,11 +326,11 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         with PlaywrightEvidence.start(self.directory, self.page, options) as evidence:
             evidence.checks.has_text("example:ready", "Ready", self.page.locator("#status"), "Ready")
 
-        model = self.read()
-        self.assertEqual("observation", model.checks[0]["target"]["kind"])
-        self.assertTrue(model.checks[0]["details"])
-        observation = next(iter(model.observations.values()))
-        self.assertEqual(1, len(observation["state"]["widgets"]))
+        evidence = self.read()
+        self.assertEqual("observation", evidence.oracle_results[0]["oracle_target"]["target_type"])
+        self.assertTrue(evidence.oracle_results[0]["oracle_details"])
+        observation = next(iter(evidence.observations.values()))
+        self.assertEqual(1, len(observation["recorded_state"]["widgets"]))
         self.assertEqual([], observation["artifacts"])
 
     def test_existing_evidence_is_preserved_and_finish_leaves_page_owned_by_caller(self):
@@ -356,10 +356,10 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             with self.assertRaises(PlaywrightError):
                 evidence.observe()
 
-        model = self.read()
-        self.assertEqual(1, len(model.observations))
-        self.assertEqual({}, model.executions)
-        self.assertEqual("finished", next(iter(model.runs.values()))["status"])
+        evidence = self.read()
+        self.assertEqual(1, len(evidence.observations))
+        self.assertEqual({}, evidence.action_executions)
+        self.assertEqual("finished", next(iter(evidence.test_runs.values()))["status"])
 
     def test_context_preserves_an_unhandled_script_failure(self):
         self.page.set_content("<p>Ready</p>")
@@ -371,7 +371,7 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
 
         self.assertIs(original, raised.exception)
         self.assertFalse(self.page.is_closed())
-        self.assertEqual("finished", next(iter(self.read().runs.values()))["status"])
+        self.assertEqual("finished", next(iter(self.read().test_runs.values()))["status"])
 
     def test_direct_playwright_calls_do_not_invent_recorded_actions(self):
         self.page.set_content("<button onclick=\"this.textContent='Done'\">Continue</button>")
@@ -380,11 +380,11 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
             self.page.locator("button").click()
             evidence.observe()
 
-        model = self.read()
-        self.assertEqual(2, len(model.observations))
+        evidence = self.read()
+        self.assertEqual(2, len(evidence.observations))
         self.assertEqual("Done", self.page.locator("button").inner_text())
-        self.assertEqual({}, model.executions)
-        self.assertEqual([], model.links())
+        self.assertEqual({}, evidence.action_executions)
+        self.assertEqual([], evidence.recorded_transitions)
 
 
 if __name__ == "__main__":

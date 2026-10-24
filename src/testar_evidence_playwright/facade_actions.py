@@ -51,8 +51,8 @@ def describe_action(subject: Any, page: Page, method_name: str, bound_method: Ca
         parameters["playwright.target_resolution"] = "The element handle is not mapped to a captured widget."
     elif isinstance(subject, (Mouse, Touchscreen)):
         parameters["playwright.target_resolution"] = "The operation identifies screen coordinates rather than a widget."
-    kind = "navigate" if method_name == "goto" else method_name
-    return {"kind": kind, "name": api_name + "." + method_name,
+    action_type = "navigate" if method_name == "goto" else method_name
+    return {"action_type": action_type, "name": api_name + "." + method_name,
         "locator": locator, "parameters": parameters}
 
 

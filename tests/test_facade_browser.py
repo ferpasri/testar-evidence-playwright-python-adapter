@@ -112,9 +112,9 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
                 for manifest in sorted(self.directory.glob("*/manifest.json"))]
 
     def read_one(self):
-        models = self.read_models()
-        self.assertEqual(1, len(models))
-        return models[0]
+        traces = self.read_models()
+        self.assertEqual(1, len(traces))
+        return traces[0]
 
     def test_run_descriptions_are_optional_and_apply_to_each_page(self):
         self.stop_playwright()
@@ -140,8 +140,8 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
                 manifests = sorted(parent.glob("*/manifest.json"))
                 self.assertEqual(2, len(manifests))
                 for manifest in manifests:
-                    model = EvidenceReader.read(manifest.parent)
-                    properties = next(iter(model.runs.values()))["run"]["properties"]
+                    evidence = EvidenceReader.read(manifest.parent)
+                    properties = next(iter(evidence.test_runs.values()))["test_run"]["properties"]
                     self.assertEqual("testar-evidence-playwright-python-adapter", properties["evidence.adapter"])
                     self.assertEqual(__version__, properties["evidence.adapter_version"])
                     descriptions = configuration.get("properties", {
@@ -153,8 +153,8 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
                             self.assertNotIn(key, properties)
                         else:
                             self.assertEqual(expected, properties[key])
-                    for record in model.executions.values():
-                        self.assertNotIn("playwright.origin", record["execution"]["parameters"])
+                    for record in evidence.action_executions.values():
+                        self.assertNotIn("playwright.origin", record["action_execution"]["parameters"])
 
     def test_unmodified_loan_script_records_eight_actions_and_three_final_checks(self):
         self.page.goto(self.fixture.url)
@@ -170,12 +170,12 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         expect(self.page.locator("#status")).to_have_text("Denied")
         self.page.close()
 
-        model = self.read_one()
-        self.assertEqual(8, len(model.executions))
-        self.assertEqual(8, len(model.links()))
-        self.assertEqual(3, len(model.checks))
-        self.assertTrue(all(check["status"] == "passed" for check in model.checks))
-        self.assertEqual({"kind": "value", "value": "Denied"}, model.checks[-1]["actual"])
+        evidence = self.read_one()
+        self.assertEqual(8, len(evidence.action_executions))
+        self.assertEqual(8, len(evidence.recorded_transitions))
+        self.assertEqual(3, len(evidence.oracle_results))
+        self.assertTrue(all(check["oracle_status"] == "passed" for check in evidence.oracle_results))
+        self.assertEqual({"value_status": "value", "value": "Denied"}, evidence.oracle_results[-1]["observed_value"])
         for path in self.directory.glob("*/evidence.jsonl"):
             self.assertNotIn("facade-password-secret", path.read_text(encoding="utf-8"))
 
@@ -192,7 +192,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual("x", self.page.locator("#name").input_value())
         self.page.close()
 
-        self.assertEqual(5, len(self.read_one().executions))
+        self.assertEqual(5, len(self.read_one().action_executions))
 
     def test_chained_locators_preserve_native_types_and_record_the_final_action(self):
         self.document("<ul><li>First <button onclick=\"this.textContent='Done'\">Choose</button></li>"
@@ -207,7 +207,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual("Done", selected.inner_text())
         self.page.close()
 
-        self.assertEqual(1, len(self.read_one().executions))
+        self.assertEqual(1, len(self.read_one().action_executions))
 
     def test_page_selector_shortcut_does_not_repeat_the_browser_action(self):
         self.document("<button id='count' onclick='window.count += 1'>Count</button>")
@@ -216,7 +216,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual(1, self.page.evaluate("window.count"))
         self.page.close()
 
-        self.assertEqual(1, len(self.read_one().executions))
+        self.assertEqual(1, len(self.read_one().action_executions))
 
     def test_trial_click_keeps_actionability_check_without_claiming_an_execution(self):
         self.document("<button onclick='window.count += 1'>Count</button>")
@@ -225,7 +225,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual(0, self.page.evaluate("window.count"))
         self.page.close()
 
-        self.assertEqual({}, self.read_one().executions)
+        self.assertEqual({}, self.read_one().action_executions)
 
     def test_readings_do_not_become_executed_actions_or_oracle_results(self):
         self.document("<input value='Original'><p title='Tooltip'>Ready</p>")
@@ -237,24 +237,24 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertTrue(self.page.screenshot().startswith(b"\x89PNG\r\n\x1a\n"))
         self.page.close()
 
-        model = self.read_one()
-        self.assertEqual({}, model.executions)
-        self.assertEqual([], model.checks)
+        evidence = self.read_one()
+        self.assertEqual({}, evidence.action_executions)
+        self.assertEqual([], evidence.oracle_results)
 
-    def test_failed_action_preserves_playwright_timeout_and_saves_rejected_submission(self):
+    def test_failed_action_preserves_playwright_timeout_and_saves_execution_error(self):
         self.document("<p>Ready</p>")
         with self.assertRaises(PlaywrightTimeoutError) as raised:
             self.page.locator("#missing").click(timeout=100)
         self.assertIn("missing", str(raised.exception))
         self.page.close()
 
-        model = self.read_one()
-        execution = next(iter(model.executions.values()))
-        self.assertEqual(1, len(model.executions))
-        self.assertEqual("rejected", execution["status"])
-        self.assertIsNone(execution["result"])
-        self.assertIn("missing", execution["error"])
-        self.assertEqual([], model.links())
+        evidence = self.read_one()
+        execution = next(iter(evidence.action_executions.values()))
+        self.assertEqual(1, len(evidence.action_executions))
+        self.assertEqual("failed", execution["status"])
+        self.assertIsNone(execution["resulting_observation"])
+        self.assertIn("missing", execution["execution_result"]["error"])
+        self.assertEqual([], evidence.recorded_transitions)
 
     def test_assertion_retry_records_one_final_result_with_its_final_reading(self):
         self.document("<p id='status'>Loading</p>")
@@ -262,10 +262,10 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertIsNone(expect(self.page.locator("#status")).to_have_text("Ready", timeout=2_000))
         self.page.close()
 
-        checks = self.read_one().checks
+        checks = self.read_one().oracle_results
         self.assertEqual(1, len(checks))
-        self.assertEqual("passed", checks[0]["status"])
-        self.assertEqual({"kind": "value", "value": "Ready"}, checks[0]["actual"])
+        self.assertEqual("passed", checks[0]["oracle_status"])
+        self.assertEqual({"value_status": "value", "value": "Ready"}, checks[0]["observed_value"])
 
     def test_failed_and_negated_assertions_keep_native_behavior(self):
         self.document("<p id='status'>Ready</p>")
@@ -275,9 +275,9 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertIn("Displayed status", str(raised.exception))
         self.page.close()
 
-        checks = self.read_one().checks
-        self.assertEqual(["passed", "failed"], [check["status"] for check in checks])
-        self.assertEqual({"kind": "value", "value": "Ready"}, checks[1]["actual"])
+        checks = self.read_one().oracle_results
+        self.assertEqual(["passed", "failed"], [check["oracle_status"] for check in checks])
+        self.assertEqual({"value_status": "value", "value": "Ready"}, checks[1]["observed_value"])
 
     def test_page_and_widget_assertions_identify_the_checked_properties(self):
         self.document("<input id='name' value='John'><p id='status' title='Tooltip'>Ready</p>")
@@ -287,34 +287,34 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         expect(self.page.locator("#status")).to_have_attribute("title", "Tooltip")
         self.page.close()
 
-        checks = self.read_one().checks
+        checks = self.read_one().oracle_results
         self.assertEqual(3, len(checks))
-        self.assertEqual("state_property", checks[0]["target"]["kind"])
-        self.assertEqual("widget_property", checks[1]["target"]["kind"])
-        self.assertEqual("playwright.dom.value", checks[1]["target"]["property"])
-        self.assertEqual("playwright.attribute.title", checks[2]["target"]["property"])
-        self.assertEqual({"kind": "value", "value": "Fixture title"}, checks[0]["actual"])
+        self.assertEqual("state_property", checks[0]["oracle_target"]["target_type"])
+        self.assertEqual("widget_property", checks[1]["oracle_target"]["target_type"])
+        self.assertEqual("playwright.dom.value", checks[1]["oracle_target"]["property"])
+        self.assertEqual("playwright.attribute.title", checks[2]["oracle_target"]["property"])
+        self.assertEqual({"value_status": "value", "value": "Fixture title"}, checks[0]["observed_value"])
 
     def test_context_close_records_the_final_state_before_its_page_is_destroyed(self):
         self.document("<input id='name' value='Before'>")
         self.page.locator("#name").fill("After")
         self.page.context.close()
 
-        model = self.read_one()
-        self.assertEqual(1, len(model.links()))
-        self.assertTrue(all(run["status"] == "finished" for run in model.runs.values()))
-        final_observation = list(model.observations.values())[-1]
+        evidence = self.read_one()
+        self.assertEqual(1, len(evidence.recorded_transitions))
+        self.assertTrue(all(run["status"] == "finished" for run in evidence.test_runs.values()))
+        final_observation = list(evidence.observations.values())[-1]
         self.assertTrue(any(widget["properties"].get("playwright.dom.value") == "After"
-                            for widget in final_observation["state"]["widgets"]))
+                            for widget in final_observation["recorded_state"]["widgets"]))
 
     def test_stop_flushes_traces_when_the_script_has_not_closed_its_pages(self):
         self.document("<input id='name'>")
         self.page.locator("#name").fill("Final value")
         self.stop_playwright()
 
-        model = self.read_one()
-        self.assertEqual(1, len(model.links()))
-        self.assertTrue(all(run["status"] == "finished" for run in model.runs.values()))
+        evidence = self.read_one()
+        self.assertEqual(1, len(evidence.recorded_transitions))
+        self.assertTrue(all(run["status"] == "finished" for run in evidence.test_runs.values()))
 
     def test_multiple_pages_have_separate_runs_and_execution_paths(self):
         self.document("<input id='name'>")
@@ -325,10 +325,10 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         second.close()
         self.page.close()
 
-        models = self.read_models()
-        self.assertEqual(2, len(models))
-        self.assertEqual([1, 1], sorted(len(model.executions) for model in models))
-        identifiers = [next(iter(model.runs)) for model in models]
+        traces = self.read_models()
+        self.assertEqual(2, len(traces))
+        self.assertEqual([1, 1], sorted(len(evidence.action_executions) for evidence in traces))
+        identifiers = [next(iter(evidence.test_runs)) for evidence in traces]
         self.assertEqual(2, len(set(identifiers)))
 
     def test_event_callbacks_receive_native_objects_and_listener_removal_still_works(self):
@@ -346,7 +346,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual(1, len(requests))
         self.page.close()
 
-        self.assertEqual(2, len(self.read_one().executions))
+        self.assertEqual(2, len(self.read_one().action_executions))
 
     def test_popup_context_manager_and_once_listener_return_recording_enabled_pages(self):
         popups = []
@@ -361,9 +361,9 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         popup.close()
         self.page.close()
 
-        models = self.read_models()
-        self.assertEqual(2, len(models))
-        self.assertEqual([0, 1], sorted(len(model.executions) for model in models))
+        traces = self.read_models()
+        self.assertEqual(2, len(traces))
+        self.assertEqual([0, 1], sorted(len(evidence.action_executions) for evidence in traces))
 
     def test_keyboard_and_mouse_calls_record_each_interaction_once(self):
         self.document("<input id='name'><button onclick='window.count += 1'>Count</button>")
@@ -376,7 +376,7 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         self.assertEqual(1, self.page.evaluate("window.count"))
         self.page.close()
 
-        self.assertEqual(3, len(self.read_one().executions))
+        self.assertEqual(3, len(self.read_one().action_executions))
 
     def test_standard_playwright_import_remains_unmodified(self):
         self.document("<input id='name'>")
@@ -423,10 +423,10 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
 
         paths = list(parent.glob("*/manifest.json"))
         self.assertEqual(1, len(paths))
-        model = EvidenceReader.read(paths[0].parent)
-        self.assertEqual(1, len(model.executions))
-        self.assertEqual("passed", model.checks[0]["status"])
-        self.assertTrue(all(run["status"] == "finished" for run in model.runs.values()))
+        evidence = EvidenceReader.read(paths[0].parent)
+        self.assertEqual(1, len(evidence.action_executions))
+        self.assertEqual("passed", evidence.oracle_results[0]["oracle_status"])
+        self.assertTrue(all(run["status"] == "finished" for run in evidence.test_runs.values()))
 
 
 if __name__ == "__main__":
