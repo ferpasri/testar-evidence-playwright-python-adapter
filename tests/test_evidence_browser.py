@@ -13,7 +13,7 @@ from urllib.parse import parse_qs
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, sync_playwright
 from testar_evidence import ObservedValue, Oracle, EvidenceError, EvidenceReader
-from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence
+from testar_evidence_playwright import AvailableAction, CaptureOptions, PlaywrightEvidence
 
 from examples.parabank_denied_loan import run
 
@@ -256,6 +256,28 @@ class PlaywrightEvidenceBrowserTests(unittest.TestCase):
         self.assertNotEqual(evidence.oracle_results[0]["oracle_target"]["observation"], evidence.oracle_results[1]["oracle_target"]["observation"])
         self.assertEqual({}, evidence.action_executions)
         self.assertEqual([], evidence.recorded_transitions)
+
+    def test_available_action_execution_retains_source_widget_binding(self):
+        self.page.set_content('<button id="first">First</button><button id="second">Second</button>')
+        first = AvailableAction("click", "Choose", self.page.locator("#first"))
+        second = AvailableAction("click", "Choose", self.page.locator("#second"))
+        with PlaywrightEvidence.start(self.directory, self.page) as recorder:
+            source = recorder.record_available_actions([first, second], scope="eligible")
+            recorder.perform(second.action_type, second.name, second.locator, {}, second.locator.click,
+                             available_action=second)
+            recorder.capture()
+        evidence = self.read()
+        observation = evidence.observations[source]
+        execution = next(iter(evidence.action_executions.values()))["action_execution"]
+        widget = next(item for item in observation["recorded_state"]["widgets"]
+                      if item["properties"].get("playwright.attribute.id") == "second")
+        self.assertEqual(2, len(observation["available_actions"]))
+        self.assertEqual(source, execution["source_observation"])
+        self.assertEqual(second.description().id, execution["action_description"])
+        self.assertEqual(widget["id"], execution["target_widget"])
+        self.assertIn({"action_description": execution["action_description"], "target_widget": widget["id"]},
+                      observation["available_actions"])
+        self.assertEqual(1, len(evidence.recorded_transitions))
 
     def test_custom_action_preserves_parameters_and_caller_operation(self):
         self.page.set_content("<button id='button' onclick=\"this.textContent='Done'\">Continue</button>")

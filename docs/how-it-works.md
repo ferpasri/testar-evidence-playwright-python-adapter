@@ -70,14 +70,6 @@ Denied passes this oracle because denial is its expected business response. A re
 
 The latest observation can stay buffered so the next action can be included in its available-action list. That capture can then be both the previous action's result and the next action's source. Consecutive oracle evaluations can produce observations with no action between them. The recorder preserves those observations without inventing a transition.
 
-## Captures and trace files
+## Where the data goes
 
-Each used page has an independent trace containing one run and one sequence. The facade reserves a fresh timestamped child directory using the SUT and optional test objective labels. Optional origin and test objective descriptions retain their original text in run properties; adapter identity and version are supplied automatically.
-
-DOM extraction, locator resolution, screenshots, and oracle readings are separate browser operations. The script controls application readiness. Captures retain the document, elements, open shadow roots, selected properties, and known limits. State-level `ui.url` and `ui.title` identify the captured address and document title. Widget attributes and live values retain their concrete source meanings.
-
-A missing captured property does not establish application-level absence. Capturing a property does not establish that an oracle evaluated it. Structural widget paths identify elements within an observation; consumers use abstraction rules to match observations and build abstract models.
-
-The evidence library validates the generic records and writes `manifest.json`, `evidence.jsonl`, and referenced screenshot artifacts. A consumer supporting schema 3 loads the complete directory. Closing the page, browser, or facade finishes the recorder; an already closed page is finished from cached captures.
-
-See [SPEC](SPEC.md) for recording rules and [README](../README.md) for commands.
+The evidence library validates and writes `manifest.json`, `evidence.jsonl`, and referenced screenshot artifacts. Each used page has its own trace. See [SPEC](SPEC.md#captured-data) for property mappings, hidden widgets, and capture limits, and [README](../README.md) for setup and test commands.

@@ -25,11 +25,11 @@ class AvailableActionTests(unittest.TestCase):
                                         CaptureOptions(screenshots=False))
 
     def test_unselected_available_actions_and_planning_parameters_are_preserved(self):
-        first = AvailableAction('type_text', 'Type', parameters={'strategy': 'random', 'mode': 'append'})
+        first = AvailableAction('type_text', 'Type', parameters={'strategy': 'random', 'mode': 'append', 'input': {'value': 'planned'}})
         second = AvailableAction('type_text', 'Type', parameters={'strategy': 'random', 'mode': 'replace'})
         with self.start() as recorder:
             source = recorder.record_available_actions([first, second], scope='eligible')
-            recorder.perform(first.action_type, first.name, None, {'value': 'input'}, lambda: None, available_action=first)
+            recorder.perform(first.action_type, first.name, None, {'input': {'value': 'actual'}}, lambda: None, available_action=first)
         evidence = EvidenceReader.read(self.directory)
         observation = evidence.observations[source]
         self.assertEqual('eligible', observation['available_action_scope'])
@@ -38,6 +38,9 @@ class AvailableActionTests(unittest.TestCase):
         self.assertEqual(source, execution['source_observation'])
         self.assertEqual(first.description().id, execution['action_description'])
         self.assertNotEqual(first.description().id, second.description().id)
+        description = evidence.action_descriptions[execution['action_description']]
+        self.assertEqual({'value': 'planned'}, description['properties']['playwright.available_parameters']['input'])
+        self.assertEqual({'value': 'actual'}, execution['parameters']['input'])
         self.assertEqual(1, len(evidence.action_executions))
 
     def test_empty_eligible_list_is_distinct_from_unknown_available_actions(self):

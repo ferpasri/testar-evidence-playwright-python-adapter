@@ -181,6 +181,28 @@ class CaptureBrowserTests(unittest.TestCase):
         self.assertTrue(snapshot.properties["evidence.capture"]["truncated"])
         self.assertTrue(snapshot.screenshot.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_hidden_parent_styles_and_text_are_preserved_without_inferred_visibility(self) -> None:
+        self.page.set_content('<section id="panel" style="display: none">'
+                              '<span id="status" style="visibility: visible">Waiting</span></section>')
+        before = capture_page(self.page, CaptureOptions(screenshots=False))
+        panel = self.widget(before, "panel")
+        status = self.widget(before, "status")
+        self.assertEqual(panel.id, status.parent)
+        self.assertEqual("none", panel.properties["playwright.style.display"])
+        self.assertEqual("visible", status.properties["playwright.style.visibility"])
+        self.assertEqual("Waiting", status.properties["ui.text"])
+        self.assertFalse(self.page.locator("#status").is_visible())
+        self.assertNotIn("ui.visible", status.properties)
+        self.assertNotIn("playwright.dom.visible", status.properties)
+
+        self.page.locator("#panel").evaluate("element => element.style.display = 'block'")
+        self.page.locator("#status").evaluate("element => element.textContent = 'Complete'")
+        after = capture_page(self.page, CaptureOptions(screenshots=False))
+        self.assertEqual("block", self.widget(after, "panel").properties["playwright.style.display"])
+        self.assertEqual("visible", self.widget(after, "status").properties["playwright.style.visibility"])
+        self.assertEqual("Complete", self.widget(after, "status").properties["ui.text"])
+        self.assertTrue(self.page.locator("#status").is_visible())
+
     def test_password_values_are_redacted_with_explicit_omission_reasons(self) -> None:
         self.page.set_content('<input id="password" type="password" value="initial-secret">')
         self.page.locator("#password").fill("changed-secret")
