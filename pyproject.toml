@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "testar-evidence-playwright-adapter"
-version = "0.3.0"
+version = "0.3.2"
 description = "Playwright actions, browser captures, and test-oracle results as portable TESTAR evidence"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 dependencies = [
-    "testar-evidence>=0.3.0,<0.4",
+    "testar-evidence>=0.3.2,<0.4",
     "playwright>=1.58,<2",
 ]
 classifiers = [
