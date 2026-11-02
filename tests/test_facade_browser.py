@@ -8,13 +8,16 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from playwright.sync_api import (
     Locator, Page, Request, Response, TimeoutError as PlaywrightTimeoutError,
     sync_playwright as native_sync_playwright,
 )
-from testar_evidence import EvidenceReader
-from testar_evidence_playwright import CaptureOptions, __version__, expect, sync_playwright
+from testar_evidence import EvidenceReader, ObservedValue, Oracle
+from testar_evidence_playwright import AvailableAction, CaptureOptions, __version__, expect, sync_playwright
+from testar_evidence_playwright.capture import capture_page
+from testar_evidence_playwright.sync_api import evidence_for
 
 
 class FacadeFixture:
@@ -115,6 +118,36 @@ class PlaywrightFacadeBrowserTests(unittest.TestCase):
         traces = self.read_models()
         self.assertEqual(1, len(traces))
         return traces[0]
+
+    def test_tool_reuses_facade_results_for_oracles_and_next_available_actions(self):
+        self.document('<button id="apply" onclick="this.textContent=Number(this.textContent)+1">0</button>')
+        recorder = evidence_for(self.page)
+        button = self.page.locator("#apply")
+        action = AvailableAction("click", "Apply", button)
+        sources = []
+        results = []
+        with patch("testar_evidence_playwright.evidence.capture_page", wraps=capture_page) as capture:
+            observation = recorder.capture()
+            for expected in ("1", "2"):
+                sources.append(observation)
+                recorder.record_available_actions([action], scope="eligible", observation=observation)
+                button.click()
+                observation = recorder.buffered_observation
+                self.assertIsNotNone(observation)
+                results.append(observation)
+                self.assertEqual(expected, button.text_content())
+                recorder.checks.record_result(Oracle("example:count"), "Click count", "passed",
+                    locator=button, property="playwright.dom.textContent", expected_value=expected,
+                    observed_value=ObservedValue.value(expected), observation=observation)
+            self.close_browser()
+            self.assertEqual(3, capture.call_count)
+        evidence = self.read_one()
+        self.assertEqual(3, len(evidence.observations))
+        executions = list(evidence.action_executions.values())
+        self.assertEqual(sources, [item["action_execution"]["source_observation"] for item in executions])
+        self.assertEqual(results, [item["resulting_observation"] for item in executions])
+        self.assertEqual(results, [item["oracle_target"]["observation"] for item in evidence.oracle_results])
+        self.assertEqual(2, len(evidence.recorded_transitions))
 
     def test_run_descriptions_are_optional_and_apply_to_each_page(self):
         self.stop_playwright()

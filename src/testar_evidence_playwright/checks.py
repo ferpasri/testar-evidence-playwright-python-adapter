@@ -68,10 +68,15 @@ class PlaywrightChecks:
                       oracle_details: dict[str, Any] | None = None, locator: Locator | None = None,
                       property: str | None = None, expected_value: Any = UNSPECIFIED,
                       observed_value: ObservedValue = ObservedValue.unknown(),
-                      oracle_severity: OracleSeverity | Any = UNSPECIFIED) -> None:
-        """Report an already obtained result at the latest capture, without running the oracle again."""
+                      oracle_severity: OracleSeverity | Any = UNSPECIFIED,
+                      observation: str | None = None) -> None:
+        """Report an obtained result, optionally requiring a particular buffered observation."""
         self._recording_error = None
         self._evidence._require_active()
+        if self._evidence._selected_execution is not None:
+            raise RuntimeError("Report the selected action's outcome before recording an oracle result")
+        if observation is not None:
+            self._evidence._require_buffered_observation(observation)
         details = {} if oracle_details is None else dict(oracle_details)
         if error is not None:
             details["playwright.assertion_error"] = error
@@ -89,10 +94,15 @@ class PlaywrightChecks:
     def evaluate(self, name: str, *, oracle: Oracle, assertion: Callable[[], Any],
                  observed_value: Callable[[], ObservedValue], locator: Locator | None = None,
                  property: str | None = None, expected_value: Any = UNSPECIFIED,
-                 oracle_severity: OracleSeverity | Any = UNSPECIFIED, redact_error: bool = False) -> None:
-        """Record one final oracle result and rethrow the original assertion or execution failure."""
+                 oracle_severity: OracleSeverity | Any = UNSPECIFIED, redact_error: bool = False,
+                 observation: str | None = None) -> None:
+        """Evaluate once, capturing afterward unless a caller supplies its buffered observation."""
         self._recording_error = None
         self._evidence._require_active()
+        if self._evidence._selected_execution is not None:
+            raise RuntimeError("Report the selected action's outcome before evaluating a test oracle")
+        if observation is not None:
+            self._evidence._require_buffered_observation(observation)
         if type(redact_error) is not bool:
             raise TypeError("redact_error must be a boolean")
         if not callable(assertion) or not callable(observed_value):
@@ -128,7 +138,8 @@ class PlaywrightChecks:
                     details["playwright.reading_error"] = self._error_text(error, redact_error)
                 try:
                     self._evidence._record_oracle_result(name, oracle, locator, property, expected_value,
-                        status, actual, details, oracle_severity=oracle_severity)
+                        status, actual, details, reuse_capture=observation is not None,
+                        oracle_severity=oracle_severity)
                 except Exception as recording:
                     self._recording_error = recording
                     if failure is None:

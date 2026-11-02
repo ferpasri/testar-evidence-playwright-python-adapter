@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from testar_evidence import ObservedValue, Oracle, EvidenceError, EvidenceReader, Widget
-from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence
+from testar_evidence_playwright import AvailableAction, CaptureOptions, PlaywrightEvidence
 from testar_evidence_playwright.capture import BrowserSnapshot
 
 
@@ -25,6 +25,96 @@ class RecordingTests(unittest.TestCase):
 
     def start(self):
         return PlaywrightEvidence.start(self.output, self.page, CaptureOptions(screenshots=False))
+
+    def test_coordinated_cycles_share_results_oracles_and_next_action_sources(self):
+        action = AvailableAction("click", "Apply")
+        sources = []
+        results = []
+        with self.start() as recorder:
+            self.assertIsNone(recorder.buffered_observation)
+            observation = recorder.capture()
+            for index in range(2):
+                sources.append(observation)
+                self.assertEqual(observation, recorder.record_available_actions(
+                    [action], scope="eligible", observation=observation))
+                recorder.perform("click", "Apply", None, {}, lambda: None,
+                    available_action=action, source_observation=observation)
+                self.assertIsNone(recorder.buffered_observation)
+                observation = recorder.capture()
+                results.append(observation)
+                recorder.checks.record_result(Oracle("example:completion"), "Completed", "passed",
+                    observation=observation)
+            self.assertEqual(3, self.capture.call_count)
+        evidence = EvidenceReader.read(self.output)
+        self.assertEqual(3, len(evidence.observations))
+        executions = list(evidence.action_executions.values())
+        self.assertEqual(sources, [item["action_execution"]["source_observation"] for item in executions])
+        self.assertEqual(results, [item["resulting_observation"] for item in executions])
+        self.assertEqual(results, [item["oracle_target"]["observation"] for item in evidence.oracle_results])
+        self.assertEqual(results[0], sources[1])
+
+    def test_invalid_observation_references_do_not_capture_write_or_execute(self):
+        callbacks = []
+        with self.start() as recorder:
+            stale = recorder.capture()
+            current = recorder.capture()
+            with PlaywrightEvidence.start(self.output.parent / "other", self.page) as other:
+                foreign = other.capture()
+                for reference in ("", stale, foreign, 12):
+                    expected_error = TypeError if reference == 12 else ValueError
+                    operations = (
+                        lambda: recorder.record_available_actions([], observation=reference),
+                        lambda: recorder.select_action("click", "Apply", None, {}, source_observation=reference),
+                        lambda: recorder.perform("click", "Apply", None, {}, lambda: callbacks.append("action"),
+                            source_observation=reference),
+                        lambda: recorder.checks.record_result(Oracle("example:ready"), "Ready", "passed",
+                            observation=reference),
+                        lambda: recorder.checks.evaluate("Ready", oracle=Oracle("example:ready"),
+                            assertion=lambda: callbacks.append("oracle"), observed_value=ObservedValue.unknown,
+                            observation=reference),
+                    )
+                    for operation in operations:
+                        with self.subTest(reference=reference, operation=operation):
+                            before = (self.output / "evidence.jsonl").read_bytes()
+                            captures = self.capture.call_count
+                            with self.assertRaises(expected_error):
+                                operation()
+                            self.assertEqual(before, (self.output / "evidence.jsonl").read_bytes())
+                            self.assertEqual(captures, self.capture.call_count)
+                            self.assertEqual(current, recorder.buffered_observation)
+        self.assertEqual([], callbacks)
+
+    def test_oracles_wait_for_selected_action_result(self):
+        callbacks = []
+        with self.start() as recorder:
+            source = recorder.capture()
+            recorder.select_action("click", "Apply", None, {}, source_observation=source)
+            with self.assertRaisesRegex(RuntimeError, "outcome"):
+                recorder.checks.record_result(Oracle("example:ready"), "Ready", "passed")
+            with self.assertRaisesRegex(RuntimeError, "outcome"):
+                recorder.checks.evaluate("Ready", oracle=Oracle("example:ready"),
+                    assertion=lambda: callbacks.append("oracle"), observed_value=ObservedValue.unknown)
+            self.assertEqual(1, self.capture.call_count)
+            recorder.report_action_result("returned")
+            recorder.capture()
+        self.assertEqual([], callbacks)
+        self.assertEqual(1, len(EvidenceReader.read(self.output).recorded_transitions))
+
+    def test_explicit_oracle_evaluation_reuses_capture_and_preserves_failure(self):
+        failure = AssertionError("Unexpected result")
+        def assertion():
+            raise failure
+        with self.start() as recorder:
+            observation = recorder.capture()
+            with self.assertRaises(AssertionError) as raised:
+                recorder.checks.evaluate("Completion", oracle=Oracle("example:completion"), assertion=assertion,
+                    observed_value=lambda: ObservedValue.value("Unexpected"), observation=observation)
+            self.assertIs(failure, raised.exception)
+            self.assertEqual(1, self.capture.call_count)
+        evidence = EvidenceReader.read(self.output)
+        self.assertEqual(1, len(evidence.observations))
+        self.assertEqual("failed", evidence.oracle_results[0]["oracle_status"])
+        self.assertEqual(observation, evidence.oracle_results[0]["oracle_target"]["observation"])
 
     def test_nested_recording_is_rejected_before_the_inner_operation_runs(self):
         calls = []

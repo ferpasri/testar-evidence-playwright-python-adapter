@@ -137,6 +137,12 @@ class PlaywrightEvidence:
         return self._sequence_id
 
     @property
+    def buffered_observation(self) -> str | None:
+        """Return the capture ID available for reuse, or None once it has been written."""
+        self._require_active()
+        return None if self._pending is None else self._pending.id
+
+    @property
     def checks(self) -> PlaywrightChecks:
         return self._checks
 
@@ -160,8 +166,9 @@ class PlaywrightEvidence:
         return self.perform("fill", "Fill " + str(locator), locator,
             {**options, "playwright.redacted_parameters": ["value"]}, lambda: locator.fill(value, **options))
 
-    def record_available_actions(self, actions: list[AvailableAction], *, scope: str = "generated") -> str:
-        """Capture a visit with the available actions a tool reports, including an empty list."""
+    def record_available_actions(self, actions: list[AvailableAction], *, scope: str = "generated",
+                                 observation: str | None = None) -> str:
+        """Report available actions, capturing afresh unless a buffered observation ID is supplied."""
         self._require_active()
         if self._selected_execution is not None:
             raise RuntimeError("Report the selected action's outcome before recording available actions")
@@ -169,10 +176,12 @@ class PlaywrightEvidence:
             raise ValueError("Available-action scope must be generated, eligible, or unknown")
         if not isinstance(actions, list) or not all(isinstance(action, AvailableAction) for action in actions):
             raise TypeError("Actions must be a list of AvailableAction values")
+        if observation is not None:
+            self._require_buffered_observation(observation)
         description_records = [action.description() for action in actions]
         self._busy = True
         try:
-            if self._pending is not None:
+            if observation is None and self._pending is not None:
                 self._flush()
             self._ensure_pending()
             available_actions = []
@@ -195,11 +204,14 @@ class PlaywrightEvidence:
             self._busy = False
 
     def select_action(self, action_type: str, name: str, locator: Locator | None,
-                      parameters: dict[str, Any], *, available_action: AvailableAction | None = None) -> str:
-        """Record the selected action before the caller executes it."""
+                      parameters: dict[str, Any], *, available_action: AvailableAction | None = None,
+                      source_observation: str | None = None) -> str:
+        """Record selection, optionally requiring a particular buffered source observation."""
         self._require_active()
         if self._selected_execution is not None:
             raise RuntimeError("Report the selected action's outcome before selecting another")
+        if source_observation is not None:
+            self._require_buffered_observation(source_observation)
         description = name if locator is None else str(locator)
         description_record = ActionDescription("playwright:action:" + identity(json.dumps([action_type, name, description])),
             action_type, {"playwright.description": name, "playwright.locator": description})
@@ -270,11 +282,13 @@ class PlaywrightEvidence:
 
     def perform(self, action_type: str, name: str, locator: Locator | None,
                 parameters: dict[str, Any], operation: Callable[[], Any], *,
-                available_action: AvailableAction | None = None) -> Any:
-        """Record one action, its actual arguments, and its returned or raised outcome."""
+                available_action: AvailableAction | None = None,
+                source_observation: str | None = None) -> Any:
+        """Record one action and its outcome, optionally using a supplied buffered source."""
         if not callable(operation):
             raise TypeError("Action operation must be callable")
-        self.select_action(action_type, name, locator, parameters, available_action=available_action)
+        self.select_action(action_type, name, locator, parameters, available_action=available_action,
+                           source_observation=source_observation)
         self._busy = True
         try:
             try:
@@ -400,6 +414,12 @@ class PlaywrightEvidence:
             expected_value=expected, observed_value=actual, oracle_details=details, oracle_severity=oracle_severity)
         EvidenceEvent("validation:event", "oracle_result_recorded", check).to_dict()
         self._pending.oracle_results.append(check)
+
+    def _require_buffered_observation(self, observation: str) -> None:
+        if not isinstance(observation, str):
+            raise TypeError("Observation reference must be a string")
+        if self._pending is None or observation != self._pending.id:
+            raise ValueError("Observation must be the current buffered capture from this recorder")
 
     def _ensure_pending(self) -> None:
         if self._pending is None:
