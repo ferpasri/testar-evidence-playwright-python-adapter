@@ -101,9 +101,7 @@ def target_path(locator: Locator | None) -> str | None:
     if locator is None:
         return None
     try:
-        if locator.count() != 1:
-            return None
-        return locator.evaluate(_resource("target.js"), timeout=1_000)
+        return locator.evaluate_all(_resource("target.js"))
     except PlaywrightError:
         return None
 

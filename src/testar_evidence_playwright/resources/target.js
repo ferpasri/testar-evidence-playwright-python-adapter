@@ -1,9 +1,9 @@
-(element) => {
-    if (window !== window.top) {
+(elements) => {
+    if (elements.length !== 1 || window !== window.top) {
         return null;
     }
     const parts = [];
-    let current = element;
+    let current = elements[0];
     while (current) {
         const parent = current.parentNode;
         const siblings = parent?.children;

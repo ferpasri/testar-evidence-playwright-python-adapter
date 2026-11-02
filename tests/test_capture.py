@@ -100,26 +100,24 @@ class CaptureMappingTests(unittest.TestCase):
                           "maxAttributesPerWidget": 40, "computedStyles": ["display"],
                           "excludedAttributes": ["data-private"]}, page.evaluate.call_args.args[1])
 
-    def test_target_mapping_does_not_guess_for_missing_ambiguous_or_unavailable_widgets(self) -> None:
+    def test_target_mapping_keeps_unresolved_results_and_browser_errors_unknown(self) -> None:
         self.assertIsNone(target_path(None))
-        for count in (0, 2):
-            locator = Mock()
-            locator.count.return_value = count
-            self.assertIsNone(target_path(locator))
-            locator.evaluate.assert_not_called()
         locator = Mock()
-        locator.count.side_effect = PlaywrightError("Page closed")
+        locator.evaluate_all.return_value = None
         self.assertIsNone(target_path(locator))
-        locator = Mock()
-        locator.count.return_value = 1
-        locator.evaluate.side_effect = PlaywrightError("Detached")
+        locator.count.assert_not_called()
+        locator.evaluate.assert_not_called()
+        locator.evaluate_all.assert_called_once()
+        locator.evaluate_all.side_effect = PlaywrightError("Page closed")
         self.assertIsNone(target_path(locator))
 
     def test_available_target_path_and_unicode_identity_are_preserved(self) -> None:
         locator = Mock()
-        locator.count.return_value = 1
-        locator.evaluate.return_value = "#document/html[0]/body[1]/button[0]"
-        self.assertEqual(locator.evaluate.return_value, target_path(locator))
+        locator.evaluate_all.return_value = "#document/html[0]/body[1]/button[0]"
+        self.assertEqual(locator.evaluate_all.return_value, target_path(locator))
+        locator.evaluate_all.assert_called_once()
+        locator.count.assert_not_called()
+        locator.evaluate.assert_not_called()
         self.assertEqual("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", identity(""))
         self.assertNotEqual(identity("café"), identity("cafe"))
 
@@ -227,6 +225,18 @@ class CaptureBrowserTests(unittest.TestCase):
         self.assertEqual(host.id, shadow.parent)
         self.assertIn("/#shadow-root/", shadow.properties["playwright.dom.path"])
         self.assertIs(shadow, snapshot.widget_at(target_path(self.page.locator("#shadow"))))
+
+    def test_native_locator_resolution_preserves_unique_missing_and_ambiguous_matches(self) -> None:
+        self.page.set_content('<section id="first"><button>Choose</button></section>'
+                              '<section id="second"><button>Choose</button></section>')
+        snapshot = capture_page(self.page, CaptureOptions(screenshots=False))
+        unique = self.page.locator("#second").get_by_role("button", name="Choose", exact=True)
+        selected = snapshot.widget_at(target_path(unique))
+        self.assertIsNotNone(selected)
+        self.assertEqual(self.widget(snapshot, "second").id, selected.parent)
+        self.assertEqual(target_path(unique), target_path(self.page.get_by_role("button").nth(1)))
+        self.assertIsNone(target_path(self.page.get_by_role("button", name="Missing", exact=True)))
+        self.assertIsNone(target_path(self.page.get_by_role("button", name="Choose", exact=True)))
 
     def test_frame_contents_are_excluded_and_the_capture_description_explains_the_scope(self) -> None:
         self.page.set_content('<iframe id="frame" srcdoc="<button id=inside>Inside</button>"></iframe>')
