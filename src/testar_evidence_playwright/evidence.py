@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 from threading import get_ident
+import time
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from testar_evidence import (
 
 from ._metadata import VERSION as VERSION, run_properties
 from .capture import BrowserSnapshot, CaptureOptions, capture_page, identity, target_path
+from .compound import CompoundOperations
 from .checks import PlaywrightChecks
 from testar_evidence.codec import dumps
 
@@ -50,6 +52,8 @@ class _PendingObservation:
     oracle_results: list[OracleResult] = field(default_factory=list)
     available_actions: list[AvailableActionBinding] | None = None
     available_action_scope: str = "unknown"
+    artifacts: list[dict] = field(default_factory=list)
+    capture: str = "filtered"
 
 
 class PlaywrightEvidence:
@@ -283,25 +287,43 @@ class PlaywrightEvidence:
     def perform(self, action_type: str, name: str, locator: Locator | None,
                 parameters: dict[str, Any], operation: Callable[[], Any], *,
                 available_action: AvailableAction | None = None,
-                source_observation: str | None = None) -> Any:
-        """Record one action and its outcome, optionally using a supplied buffered source."""
+                source_observation: str | None = None, record_operations: bool = False) -> Any:
+        """Record one action; opt-in native operation details include a buffered result capture."""
         if not callable(operation):
             raise TypeError("Action operation must be callable")
-        self.select_action(action_type, name, locator, parameters, available_action=available_action,
-                           source_observation=source_observation)
+        if type(record_operations) is not bool:
+            raise TypeError("record_operations must be a boolean")
+        runtime = getattr(self._page, "_evidence_runtime", None)
+        if record_operations and (runtime is None or runtime.is_suspended):
+            raise ValueError("Native operation recording requires an active facade page outside automatic recording")
+        if record_operations:
+            parameters = {**parameters, "playwright.compound_action": True}
+        execution = self.select_action(action_type, name, locator, parameters, available_action=available_action,
+                                       source_observation=source_observation)
+        operations = CompoundOperations(lambda target: target is None or self._password_target(target, None),
+            "playwright.redacted_parameters" in self._selected_parameters) if record_operations else None
         self._busy = True
         try:
             try:
-                with self._recording_scope():
+                scope = self._recording_scope() if operations is None else runtime.collect_operations(
+                    self._page, operations.invoke)
+                with scope:
                     result = operation()
             except BaseException as error:
                 self._ending_reason = "action_failed"
                 try:
-                    self._report_action_result("error", self._action_error(error, self._selected_parameters))
+                    error_parameters = self._selected_parameters
+                    if operations is not None and operations.has_secrets:
+                        error_parameters = {"playwright.redacted_parameters": ["operations"]}
+                    self._report_action_result("error", self._action_error(error, error_parameters))
+                    if operations is not None:
+                        self._capture_compound_result(operations.report(execution))
                 except Exception as recording:
                     error.add_note("Evidence recording also failed: " + str(recording))
                 raise
             self._report_action_result("returned")
+            if operations is not None:
+                self._capture_compound_result(operations.report(execution))
             return result
         finally:
             self._busy = False
@@ -421,13 +443,30 @@ class PlaywrightEvidence:
         if self._pending is None or observation != self._pending.id:
             raise ValueError("Observation must be the current buffered capture from this recorder")
 
-    def _ensure_pending(self) -> None:
+    def _capture_compound_result(self, report) -> None:
+        try:
+            artifact = self._store.put_artifact((dumps(report) + "\n").encode("utf-8"), "application/json")
+        except BaseException:
+            self._broken = True
+            raise
+        self._ensure_pending(allow_unavailable=True)
+        self._pending.artifacts.append(artifact)
+
+    def _ensure_pending(self, *, allow_unavailable: bool = False) -> None:
         if self._pending is None:
+            capture = "filtered"
             with self._recording_scope():
-                snapshot = capture_page(self._page, self._options)
+                try:
+                    snapshot = capture_page(self._page, self._options)
+                except PlaywrightError as error:
+                    if not allow_unavailable:
+                        raise
+                    snapshot = BrowserSnapshot(time.time_ns() // 1_000,
+                        {"playwright.capture_error": type(error).__name__}, [], None)
+                    capture = "unavailable"
             self._observations += 1
             self._pending = _PendingObservation(self.run_id + ":observation:" + str(self._observations),
-                self._observations, snapshot)
+                self._observations, snapshot, capture=capture)
 
     def _flush(self, description_record: ActionDescription | None = None, target: str | None = None) -> str:
         pending = self._pending
@@ -437,7 +476,7 @@ class PlaywrightEvidence:
             selected = AvailableActionBinding(description_record.id, target)
             if selected not in available_actions:
                 available_actions.append(selected)
-        artifacts = []
+        artifacts = list(pending.artifacts)
         if pending.snapshot.screenshot is not None:
             try:
                 artifacts.append(self._store.put_artifact(pending.snapshot.screenshot, "image/png"))
@@ -445,7 +484,7 @@ class PlaywrightEvidence:
                 self._broken = True
                 raise
         state = RecordedState(pending.id + ":state", pending.snapshot.properties,
-            pending.snapshot.widgets, "filtered")
+            pending.snapshot.widgets, pending.capture)
         self._emit("observation_recorded", Observation(pending.id, self.sequence_id, pending.observation_index,
             pending.snapshot.timestamp_micros, state, pending.available_action_scope, available_actions, artifacts))
         self._last_observation = pending.id

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from testar_evidence import ObservedValue, Oracle, EvidenceReader
+from testar_evidence_playwright.capture import capture_page
 from testar_evidence_playwright import CaptureOptions, PlaywrightEvidence, evidence_for, expect, sync_playwright
 
 
@@ -41,6 +43,123 @@ class PlaywrightFacadeEdgeTests(unittest.TestCase):
     def traces(self):
         return [EvidenceReader.read(path.parent)
             for path in sorted(self.directory.glob("*/manifest.json"))]
+
+    def operation_reports(self):
+        reports = []
+        for manifest in self.directory.glob("*/manifest.json"):
+            evidence = EvidenceReader.read(manifest.parent)
+            for observation in evidence.observations.values():
+                for artifact in observation["artifacts"]:
+                    if artifact["media_type"] == "application/json":
+                        reports.append(json.loads((manifest.parent / artifact["path"]).read_text(encoding="utf-8")))
+        return reports
+
+    def test_compound_retains_order_arguments_and_outcomes_without_intermediate_captures(self):
+        self.document('<input id="name" value="Original">')
+        locator = self.page.locator("#name")
+        recorder = evidence_for(self.page)
+        def replace():
+            locator.fill("")
+            locator.press_sequentially("John")
+            locator.press("Enter")
+            return "completed"
+        with patch("testar_evidence_playwright.evidence.capture_page", wraps=capture_page) as capture:
+            self.assertEqual("completed", recorder.perform("replace_text", "Replace text", locator,
+                {"value": "John"}, replace, record_operations=True))
+            self.close_browser()
+            self.assertEqual(2, capture.call_count)
+        evidence = self.traces()[0]
+        self.assertEqual(2, len(evidence.observations))
+        self.assertEqual(1, len(evidence.action_executions))
+        self.assertEqual(1, len(evidence.recorded_transitions))
+        reports = self.operation_reports()
+        self.assertEqual(1, len(reports))
+        report = reports[0]
+        self.assertEqual("compound-action-operations", report["format"])
+        self.assertIn(report["action_execution"], evidence.action_executions)
+        operations = report["operations"]
+        self.assertEqual([1, 2, 3], [item["index"] for item in operations])
+        self.assertEqual(["Locator.fill", "Locator.press_sequentially", "Locator.press"],
+                         [item["method"] for item in operations])
+        self.assertEqual(["", "John"], [item["parameters"]["value"] for item in operations[:2]])
+        self.assertEqual("Enter", operations[2]["parameters"]["key"])
+        self.assertTrue(all(item["outcome"] == "returned" and item["error"] is None for item in operations))
+
+    def test_compound_failure_keeps_completed_operations_and_original_exception(self):
+        self.document('<input id="name" value="Original">')
+        locator = self.page.locator("#name")
+        recorder = evidence_for(self.page)
+        failures = []
+        def replace():
+            locator.fill("")
+            try:
+                self.page.locator("#missing").click(timeout=20)
+            except Exception as error:
+                failures.append(error)
+                raise
+            locator.press_sequentially("Must not run")
+        with self.assertRaises(Exception) as raised:
+            recorder.perform("replace_text", "Replace text", locator, {}, replace, record_operations=True)
+        self.assertIs(failures[0], raised.exception)
+        self.assertEqual("", locator.input_value())
+        self.close_browser()
+        evidence = self.traces()[0]
+        execution = next(iter(evidence.action_executions.values()))
+        self.assertEqual("error", execution["execution_result"]["outcome"])
+        self.assertEqual([], evidence.recorded_transitions)
+        self.assertEqual(["returned", "error"],
+                         [item["outcome"] for item in self.operation_reports()[0]["operations"]])
+
+    def test_compound_password_arguments_and_errors_are_redacted_in_artifact_and_events(self):
+        self.document('<input id="password" type="password">')
+        secret = "compound-secret-value"
+        locator = self.page.locator("#password")
+        failure = AssertionError("Unexpected " + secret)
+        def replace():
+            locator.fill(secret)
+            locator.press("Enter")
+            raise failure
+        with self.assertRaises(AssertionError) as raised:
+            evidence_for(self.page).perform("replace_text", "Replace secret", locator,
+                {"value": secret}, replace, record_operations=True)
+        self.assertIs(failure, raised.exception)
+        self.close_browser()
+        reports = self.operation_reports()
+        self.assertNotIn(secret, self.jsonl() + json.dumps(reports))
+        self.assertEqual(["value"], reports[0]["operations"][0]["parameters"]["playwright.redacted_parameters"])
+        self.assertEqual(["key"], reports[0]["operations"][1]["parameters"]["playwright.redacted_parameters"])
+
+    def test_compound_page_closure_keeps_operation_log_with_unavailable_capture(self):
+        self.document('<input id="name">')
+        locator = self.page.locator("#name")
+        def replace_and_close():
+            locator.fill("John")
+            self.page.close()
+        evidence_for(self.page).perform("custom", "Replace and close", locator, {},
+            replace_and_close, record_operations=True)
+        self.close_browser()
+        evidence = self.traces()[0]
+        observations = list(evidence.observations.values())
+        self.assertEqual("unavailable", observations[-1]["recorded_state"]["capture"])
+        self.assertEqual([], observations[-1]["recorded_state"]["widgets"])
+        self.assertEqual(1, len(self.operation_reports()[0]["operations"]))
+
+    def test_compound_does_not_group_preceding_login_operations(self):
+        self.document('<input id="username"><input id="password" type="password"><button id="login">Sign in</button>')
+        self.page.locator("#username").fill("John")
+        self.page.locator("#password").fill("demo")
+        self.page.locator("#login").click()
+        locator = self.page.locator("#username")
+        def replace():
+            locator.fill("")
+            locator.press_sequentially("Jane")
+        evidence_for(self.page).perform("replace_text", "Replace text", locator, {},
+            replace, record_operations=True)
+        self.close_browser()
+        evidence = self.traces()[0]
+        self.assertEqual(4, len(evidence.action_executions))
+        self.assertEqual(4, len(evidence.recorded_transitions))
+        self.assertEqual(1, len(self.operation_reports()))
 
     def jsonl(self):
         return "\n".join(path.read_text(encoding="utf-8")

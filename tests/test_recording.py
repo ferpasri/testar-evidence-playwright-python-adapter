@@ -116,6 +116,17 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual("failed", evidence.oracle_results[0]["oracle_status"])
         self.assertEqual(observation, evidence.oracle_results[0]["oracle_target"]["observation"])
 
+    def test_operation_recording_requires_facade_before_executing_or_writing(self):
+        callbacks = []
+        with self.start() as recorder:
+            before = (self.output / "evidence.jsonl").read_bytes()
+            with self.assertRaisesRegex(ValueError, "facade"):
+                recorder.perform("custom", "Compound", None, {}, lambda: callbacks.append("executed"),
+                    record_operations=True)
+            self.assertEqual(before, (self.output / "evidence.jsonl").read_bytes())
+            self.assertEqual(0, self.capture.call_count)
+        self.assertEqual([], callbacks)
+
     def test_nested_recording_is_rejected_before_the_inner_operation_runs(self):
         calls = []
         with self.start() as evidence:

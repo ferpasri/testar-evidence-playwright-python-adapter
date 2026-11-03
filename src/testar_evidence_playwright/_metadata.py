@@ -3,7 +3,7 @@
 from typing import Any
 
 ADAPTER_ID = "testar-evidence-playwright-python-adapter"
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 
 def run_properties(properties: dict[str, Any] | None = None, *, origin: str | None = None,

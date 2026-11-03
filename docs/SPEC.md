@@ -39,7 +39,13 @@ The latest capture can remain buffered until the next action is known. Its obser
 
 The reported scope is generated, eligible under the caller's selection rules, or unknown. An explicitly empty eligible list keeps that meaning. The facade reports its next selected operation with unknown scope; the caller can report a richer list through the explicit API.
 
-Passing a reported available action when selecting or performing it connects the execution to that description. A choice absent from the reported list is rejected before its callback runs. A callback containing several native operations forms one compound action. Automatic records inside that boundary are suppressed.
+Passing a reported available action when selecting or performing it connects the execution to that description. A choice absent from the reported list is rejected before its callback runs. A callback containing several native operations forms one compound action. Automatic transitions inside that boundary are suppressed.
+
+`perform(..., record_operations=True)` retains the supported native operations in order and captures the compound result once. The page must come from the facade, and supported operations stay on that page. Each operation retains its method, locator description, supplied parameters, and returned/error outcome. The original exception reaches the caller; completed operations are retained and no operation is retried automatically. Password arguments and related error text are redacted. Ordinary calls outside this explicit boundary remain separate actions.
+
+The resulting observation references an `application/json` artifact. Its object contains `format: "compound-action-operations"`, `version: 1`, the parent `action_execution` ID, and an ordered `operations` list. Each operation contains `index`, `method`, `action_type`, nullable `locator`, `parameters`, `outcome`, and nullable `error`. The parent execution parameters include `playwright.compound_action: true`. The artifact uses the evidence library's content-addressed storage; its filename extension does not determine its media type.
+
+Intermediate GUI captures are omitted within this boundary. The result remains buffered for oracle reporting and the next action. If the page cannot be captured, the observation records unavailable capture with no invented widget data, while retaining the operation artifact. Error executions keep the format's normal error semantics and do not acquire a completed recorded transition.
 
 ## Data used by action abstraction rules
 

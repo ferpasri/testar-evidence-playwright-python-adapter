@@ -98,6 +98,7 @@ class _Runtime:
         self._callbacks = []
         self._classes = {}
         self._callback_actions_allowed = False
+        self._compound = None
 
     @property
     def is_suspended(self):
@@ -110,6 +111,17 @@ class _Runtime:
             yield
         finally:
             self._suspensions -= 1
+
+    @contextmanager
+    def collect_operations(self, page, callback):
+        if self._compound is not None or self.is_suspended:
+            raise RuntimeError("Compound operation recording cannot be nested")
+        self._compound = (page, callback)
+        try:
+            with self.suspended():
+                yield
+        finally:
+            self._compound = None
 
     def page_for(self, subject):
         if isinstance(subject, native.Page):
@@ -274,6 +286,14 @@ class _Runtime:
     def invoke(self, subject, name, method, arguments, options):
         page = self.page_for(subject)
         if self.is_suspended:
+            if self._compound is not None and self._suspensions == 1:
+                with self.suspended():
+                    description = describe_action(subject, page, name, method, arguments, options) if page else None
+                    if description is not None:
+                        if page is not self._compound[0]:
+                            raise ValueError("Compound operations must use the recorder's page")
+                        result = self._compound[1](description, lambda: method(*arguments, **options))
+                        return self.attach(result, page)
             return self.attach(method(*arguments, **options), page)
         with self.suspended():
             arguments, options = self._arguments(method, arguments, options, page)
