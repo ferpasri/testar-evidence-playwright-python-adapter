@@ -37,6 +37,8 @@ The latest capture can remain buffered until the next action is known. Its obser
 
 `AvailableAction` describes an operation reported by the caller: action type, name, optional locator, and planning parameters. The recorder saves an action description and a binding to the captured widget when identifiable. Unexecuted choices remain recorded. Actual generated input belongs to the action execution parameters rather than its planning description.
 
+The facade retains simple CSS targets supplied directly to `page.locator()`, such as `#apply` or `button[id="apply"]`. Available-action recording resolves these targets together in bounded native Playwright calls. It requires exactly one matching element for each widget binding, including matches in open shadow roots. Other locator forms and failed batch calls use individual native resolution. The target cache lasts for that reported list; later lists resolve their targets again.
+
 The reported scope is generated, eligible under the caller's selection rules, or unknown. An explicitly empty eligible list keeps that meaning. The facade reports its next selected operation with unknown scope; the caller can report a richer list through the explicit API.
 
 Passing a reported available action when selecting or performing it connects the execution to that description. A choice absent from the reported list is rejected before its callback runs. A callback containing several native operations forms one compound action. Automatic transitions inside that boundary are suppressed.
@@ -72,6 +74,8 @@ Mapped assertions target a captured state property, widget, or widget property. 
 Readings follow assertion execution and precede capture. These are separate browser operations and can observe application changes. An unavailable reading becomes unknown with its explanation. An original oracle failure is rethrown; an additional persistence failure remains available through the helper's recording-error information.
 
 ## Captured data
+
+The capture script returns its data as JSON text through Playwright. Python decodes that text before building widgets and their parent references. Capture fields, selection limits, and redaction follow the same rules for every caller. Screenshots are obtained separately as PNG bytes.
 
 Capture includes the document, DOM elements, and open shadow roots. Frame documents and closed shadow roots have explicit capture limitations. Widget IDs and structural paths identify elements within an observation; cross-observation equivalence is decided by a consumer's abstraction rules.
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 from importlib.resources import files
+from json import loads
 import time
 from typing import Any, TYPE_CHECKING
 
@@ -77,14 +78,14 @@ class BrowserSnapshot:
 
 
 def capture_page(page: Page, options: CaptureOptions) -> BrowserSnapshot:
-    result = page.evaluate(_resource("capture.js"), {
+    result = loads(page.evaluate(_capture_script(), {
         "maxWidgets": options.max_widgets,
         "maxValueCharacters": options.max_string_length,
         "maxTotalCharacters": options.max_property_characters,
         "maxAttributesPerWidget": options.max_attributes,
         "computedStyles": list(options.computed_styles),
         "excludedAttributes": list(options.excluded_attributes),
-    })
+    }))
     captured_at = time.time_ns() // 1_000
     widgets = []
     for node in result["nodes"]:
@@ -112,6 +113,12 @@ def identity(value: str) -> str:
 
 def _widget_id(path: str) -> str:
     return "playwright:widget:" + identity(path)
+
+
+@lru_cache(maxsize=1)
+def _capture_script() -> str:
+    # Transfer one JSON string instead of a nested Playwright protocol object.
+    return "(options) => JSON.stringify((" + _resource("capture.js") + ")(options))"
 
 
 @lru_cache(maxsize=2)

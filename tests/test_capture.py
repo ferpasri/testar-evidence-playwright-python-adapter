@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import json
 import os
 import unittest
 from unittest.mock import Mock, patch
@@ -74,7 +75,7 @@ class CaptureMappingTests(unittest.TestCase):
             "properties": {"ui.url": "https://example.test/", "ui.title": "Page"},
         }
         page = Mock()
-        page.evaluate.return_value = result
+        page.evaluate.return_value = json.dumps(result)
         page.screenshot.return_value = b"example screenshot"
         with patch("testar_evidence_playwright.capture.time.time_ns", return_value=123_456_789):
             snapshot = capture_page(page, CaptureOptions())
@@ -92,13 +93,23 @@ class CaptureMappingTests(unittest.TestCase):
 
     def test_options_reach_the_capture_script_and_screenshots_can_be_disabled(self) -> None:
         page = Mock()
-        page.evaluate.return_value = {"nodes": [], "properties": {}}
+        page.evaluate.return_value = json.dumps({"nodes": [], "properties": {}})
         snapshot = capture_page(page, CaptureOptions(10, 20, 30, 40, ("display",), ("data-private",), False))
         self.assertIsNone(snapshot.screenshot)
         page.screenshot.assert_not_called()
         self.assertEqual({"maxWidgets": 10, "maxValueCharacters": 20, "maxTotalCharacters": 30,
                           "maxAttributesPerWidget": 40, "computedStyles": ["display"],
                           "excludedAttributes": ["data-private"]}, page.evaluate.call_args.args[1])
+
+    def test_capture_browser_errors_propagate_without_retrying_or_taking_a_screenshot(self) -> None:
+        page = Mock()
+        failure = PlaywrightError("Page closed during capture")
+        page.evaluate.side_effect = failure
+        with self.assertRaises(PlaywrightError) as raised:
+            capture_page(page, CaptureOptions())
+        self.assertIs(failure, raised.exception)
+        page.evaluate.assert_called_once()
+        page.screenshot.assert_not_called()
 
     def test_target_mapping_keeps_unresolved_results_and_browser_errors_unknown(self) -> None:
         self.assertIsNone(target_path(None))
@@ -146,6 +157,28 @@ class CaptureBrowserTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.context.close()
+
+    def test_json_transport_preserves_the_original_capture_data(self) -> None:
+        from testar_evidence_playwright.capture import _resource, _capture_script
+        self.page.set_content('<title>Transport</title><textarea id="input">initial</textarea>'
+            '<input type="password" value="private-value"><input type="checkbox" checked>'
+            '<select><option>A</option><option selected>B</option></select>'
+            '<div hidden data-excluded="omit">Hidden</div><div id="host"></div>')
+        text = 'Quotes " and newline\n, caf\u00e9, \u6f22\u5b57, \U0001f680'
+        self.page.locator('#input').fill(text)
+        self.page.evaluate("document.querySelector('#host').attachShadow({mode:'open'}).innerHTML = '<button>Shadow</button>'")
+        arguments = {"maxWidgets": 100, "maxValueCharacters": 8192, "maxTotalCharacters": 100000,
+                     "maxAttributesPerWidget": 256, "computedStyles": ["display", "color"],
+                     "excludedAttributes": ["data-excluded"]}
+        for limits in ({}, {"maxWidgets": 4}, {"maxValueCharacters": 4}, {"maxTotalCharacters": 120}):
+            options = {**arguments, **limits}
+            expected = self.page.evaluate(_resource("capture.js"), options)
+            transferred = self.page.evaluate(_capture_script(), options)
+            self.assertIsInstance(transferred, str)
+            self.assertEqual(expected, json.loads(transferred))
+            self.assertNotIn("private-value", transferred)
+        snapshot = capture_page(self.page, CaptureOptions(screenshots=False))
+        self.assertEqual(text, self.widget(snapshot, "input").properties['playwright.dom.value'])
 
     def test_raw_properties_aliases_and_known_exclusions_keep_their_meaning(self) -> None:
         self.page.set_content("""

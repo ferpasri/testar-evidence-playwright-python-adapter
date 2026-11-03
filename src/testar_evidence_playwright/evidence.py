@@ -22,6 +22,7 @@ from testar_evidence import (
 from ._metadata import VERSION as VERSION, run_properties
 from .capture import BrowserSnapshot, CaptureOptions, capture_page, identity, target_path
 from .compound import CompoundOperations
+from .targets import target_paths
 from .checks import PlaywrightChecks
 from testar_evidence.codec import dumps
 
@@ -189,13 +190,15 @@ class PlaywrightEvidence:
                 self._flush()
             self._ensure_pending()
             available_actions = []
-            resolved = {}
+            targets = {None if action.locator is None else str(action.locator): action.locator for action in actions}
             with self._recording_scope():
+                paths = target_paths(self._page, list(targets.values()), fallback=target_path)
+                resolved = {}
+                for description, path in zip(targets, paths):
+                    widget = self._pending.snapshot.widget_at(path)
+                    resolved[description] = None if widget is None else widget.id
                 for action, description_record in zip(actions, description_records):
                     description = None if action.locator is None else str(action.locator)
-                    if description not in resolved:
-                        widget = self._pending.snapshot.widget_at(target_path(action.locator))
-                        resolved[description] = None if widget is None else widget.id
                     available_action = AvailableActionBinding(description_record.id, resolved[description])
                     if available_action not in available_actions:
                         available_actions.append(available_action)

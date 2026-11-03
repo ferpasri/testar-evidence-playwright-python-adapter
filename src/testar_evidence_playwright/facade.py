@@ -13,6 +13,7 @@ from ._metadata import run_properties
 from .capture import CaptureOptions
 from .evidence import PlaywrightEvidence
 from .facade_actions import describe_action
+from .targets import remember_target
 
 
 def sync_playwright(*, evidence_path: str | Path = "target/traces", sut: str = "application",
@@ -283,6 +284,12 @@ class _Runtime:
                 supplied.arguments[name] = self._callback(value, page)
         return supplied.args, supplied.kwargs
 
+    def _attach_result(self, subject, name, arguments, options, result, page):
+        result = self.attach(result, page)
+        if isinstance(subject, native.Page):
+            remember_target(subject, name, arguments, options, result)
+        return result
+
     def invoke(self, subject, name, method, arguments, options):
         page = self.page_for(subject)
         if self.is_suspended:
@@ -293,8 +300,8 @@ class _Runtime:
                         if page is not self._compound[0]:
                             raise ValueError("Compound operations must use the recorder's page")
                         result = self._compound[1](description, lambda: method(*arguments, **options))
-                        return self.attach(result, page)
-            return self.attach(method(*arguments, **options), page)
+                        return self._attach_result(subject, name, arguments, options, result, page)
+            return self._attach_result(subject, name, arguments, options, method(*arguments, **options), page)
         with self.suspended():
             arguments, options = self._arguments(method, arguments, options, page)
             cleanup_error = None
@@ -316,7 +323,7 @@ class _Runtime:
                         recorder.capture()
                 if cleanup_error is not None:
                     raise cleanup_error
-                result = self.attach(result, page)
+                result = self._attach_result(subject, name, arguments, options, result, page)
                 self._drain_closed()
                 return result
             except BaseException as error:
