@@ -111,3 +111,9 @@ A trace contains `manifest.json`, `evidence.jsonl`, and referenced screenshot fi
 Closing a page, context, browser, or facade session finishes the corresponding recorder. An unavailable page is finished from its cached captures, without inventing a result observation. Successfully saved prefixes remain readable after later failures.
 
 Unit and controlled local browser tests cover native delegation, final assertion outcomes, optional metadata, available actions, compound actions, execution errors, precise oracle targets, severity, password redaction, capture limits, callbacks, and reopening the produced traces. Abstraction remains separate from these recorded traces.
+
+## Selection after saving an observation
+
+An exploration controller can call `capture()`, report available actions against that buffered observation, and use `commit_capture()` to save it without another capture. `recorded_evidence` returns an independent snapshot of committed records.
+
+`select_recorded_action(action, observation, parameters)` selects one reported action from the latest committed observation. It rejects older observations, ambiguous bindings, and calls made while another capture is buffered. `execute_selected(operation)` invokes the supplied operation and records its outcome, suppressing nested facade recording. The caller captures the resulting state afterwards. Password input parameters and error details follow the adapter's redaction policy.

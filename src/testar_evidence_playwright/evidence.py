@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from playwright.sync_api import Error as PlaywrightError, Locator, Page
 from testar_evidence import (
-    UNSPECIFIED, AvailableAction as AvailableActionBinding, ActionDescription, ObservedValue, OracleResult, Oracle, OracleTarget,
+    UNSPECIFIED, EvidenceError, AvailableAction as AvailableActionBinding, ActionDescription, ObservedValue, OracleResult, Oracle, OracleTarget,
     RecordedState, EvidenceEvent, ActionExecution, ActionExecutionResult, JsonlStore, Manifest, Observation, OracleSeverity, TestRun, TestSequence,
 )
 
@@ -207,6 +207,97 @@ class PlaywrightEvidence:
             self._pending.available_actions = available_actions
             self._pending.available_action_scope = scope
             return self._pending.id
+        finally:
+            self._busy = False
+
+    @property
+    def recorded_evidence(self):
+        """Return an independent snapshot of committed records, excluding buffered captures."""
+        self._require_active()
+        return self._store.evidence
+
+    def commit_capture(self) -> str:
+        """Save the buffered observation without taking another DOM capture or screenshot."""
+        self._require_active()
+        if self._selected_execution is not None:
+            raise RuntimeError("Report the action outcome before committing a capture")
+        if self._pending is None:
+            raise ValueError("Capture an observation before committing it")
+        self._busy = True
+        try:
+            return self._flush()
+        finally:
+            self._busy = False
+
+    def select_recorded_action(self, action: AvailableAction, observation: str, parameters: dict) -> str:
+        """Select an available action from the latest committed observation without recapturing."""
+        self._require_active()
+        if self._selected_execution is not None:
+            raise RuntimeError("Report the selected action's outcome before selecting another")
+        if self._pending is not None or observation != self._last_observation:
+            raise ValueError("Use the latest committed observation with no buffered capture")
+        if not isinstance(action, AvailableAction):
+            raise TypeError("action must be AvailableAction")
+        try:
+            available_actions = self._store.available_actions(observation)
+        except EvidenceError as error:
+            if error.code == "invalid_reference":
+                raise ValueError("Unknown recorded observation") from error
+            raise
+        description = action.description()
+        bindings = [item for item in available_actions
+                    if item["action_description"] == description.id]
+        if len(bindings) != 1:
+            raise ValueError("Action must have one available binding in the recorded observation")
+        target = bindings[0]["target_widget"]
+        prepared = EvidenceEvent("validation:event", "action_selected",
+            ActionExecution("validation:execution", self.sequence_id, observation, description.id,
+                            target, parameters)).to_dict()["event"]["data"]["parameters"]
+        removed = {"value", "text", "key", "playwright.positional_arguments",
+                   "playwright.keyword_arguments"}.intersection(prepared)
+        secret = False
+        if removed:
+            with self._recording_scope():
+                secret = action.locator is None or self._password_target(action.locator, None)
+        if secret:
+            for name in removed:
+                prepared.pop(name)
+            if removed:
+                prepared["playwright.redacted_parameters"] = sorted(
+                    set(prepared.get("playwright.redacted_parameters", [])) | removed)
+        self._busy = True
+        try:
+            self._executions += 1
+            execution = self.run_id + ":execution:" + str(self._executions)
+            self._emit("action_selected", ActionExecution(execution, self.sequence_id, observation,
+                description.id, target, prepared))
+            self._selected_execution = execution
+            self._selected_parameters = prepared
+            return execution
+        finally:
+            self._busy = False
+
+    def execute_selected(self, operation: Callable[[], Any]) -> Any:
+        """Execute a previously selected action, suppressing duplicate facade recording."""
+        self._require_active()
+        if self._selected_execution is None:
+            raise RuntimeError("Select an action before executing it")
+        if not callable(operation):
+            raise TypeError("operation must be callable")
+        self._busy = True
+        try:
+            try:
+                with self._recording_scope():
+                    result = operation()
+            except BaseException as error:
+                self._ending_reason = "action_failed"
+                try:
+                    self._report_action_result("error", self._action_error(error, self._selected_parameters))
+                except Exception as recording:
+                    error.add_note("Evidence recording also failed: " + str(recording))
+                raise
+            self._report_action_result("returned")
+            return result
         finally:
             self._busy = False
 
